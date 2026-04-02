@@ -1,0 +1,263 @@
+package storage
+
+import (
+	"database/sql"
+	"log"
+
+	// CGO-free driver and embedded SQLite for macOS/ARM64 compatibility
+	_ "github.com/ncruces/go-sqlite3/driver"
+)
+
+type Verse struct {
+	ID          string `json:"id"`
+	Translation string `json:"translation"`
+	Book        string `json:"book"`
+	Chapter     int    `json:"chapter"`
+	Verse       int    `json:"verse"`
+	Text        string `json:"text"`
+}
+
+func InitDB(filepath string) *sql.DB {
+	db, err := sql.Open("sqlite3", filepath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Performance: WAL mode is essential for concurrent reads/writes in Go
+	_, err = db.Exec("PRAGMA journal_mode=WAL;")
+	if err != nil {
+		log.Fatalf("Failed to enable WAL: %v", err)
+	}
+
+	// Relational Integrity: Must be enabled manually in SQLite
+	_, err = db.Exec("PRAGMA foreign_keys = ON;")
+	if err != nil {
+		log.Fatalf("Failed to enable foreign keys: %v", err)
+	}
+
+	return db
+}
+
+func CreateTables(db *sql.DB) {
+	schema := `
+    -- 1. Main Bible Text (Human Readable)
+    CREATE TABLE IF NOT EXISTS verses (
+        id TEXT PRIMARY KEY, -- e.g., 'BSB.MAT.1.1'
+        translation TEXT,   
+        book TEXT,
+        chapter INTEGER,
+        verse INTEGER,
+        text TEXT
+    );
+
+    -- 2. Full-Text Search (For lightning fast search in Next.js)
+    CREATE VIRTUAL TABLE IF NOT EXISTS verses_fts USING fts5(
+        osis_id UNINDEXED, 
+        translation UNINDEXED, 
+        content
+    );
+
+    -- 3. Lexicon (Original Language Dictionaries)
+    CREATE TABLE IF NOT EXISTS lexicon (
+        strongs_id TEXT PRIMARY KEY, 
+        word TEXT,
+        transliteration TEXT,
+        definition TEXT
+    );
+
+    -- 4. Morphology (Grammar Explanations)
+    CREATE TABLE IF NOT EXISTS morphology (
+        code TEXT PRIMARY KEY, -- e.g., 'V-PAI-3S'
+        short_def TEXT,        -- 'Verb Present Active Indicative'
+        long_exp TEXT          -- 'Detailed explanation of the function'
+    );
+
+    -- 5. Verse Analysis (The "Amalgamated" Word-by-Word link)
+    -- This table connects specific words in a verse to Strongs and Morph codes
+    CREATE TABLE IF NOT EXISTS verse_analysis (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        verse_id TEXT,
+        word_order INTEGER,
+        surface_word TEXT,     -- Original Greek/Hebrew word
+        english_gloss TEXT,    -- Brief English meaning
+        strongs_id TEXT,       -- Link to Lexicon
+        morph_code TEXT,       -- Link to Morphology
+        manuscript_type TEXT,  -- N (Ancient), K (Traditional), etc.
+        FOREIGN KEY(verse_id) REFERENCES verses(id),
+        FOREIGN KEY(strongs_id) REFERENCES lexicon(strongs_id),
+        FOREIGN KEY(morph_code) REFERENCES morphology(code)
+    );
+
+-- 6. Versification Mapping (The bridge between BSB, KJV, and Original Texts)
+CREATE TABLE IF NOT EXISTS versification (
+        mapping_type TEXT,   -- OneToOne, MergedPrevVerse, etc.
+        kjv_ref TEXT,        -- The English/KJV standard reference
+        hebrew_ref TEXT,     -- The Hebrew (MT) equivalent
+        greek_ref TEXT,      -- The Greek (LXX) equivalent
+        notes TEXT,          -- To store "Absent" or "NotExist" logic
+        PRIMARY KEY (kjv_ref)
+    );
+
+    -- 7. Cross References
+    CREATE TABLE IF NOT EXISTS cross_references (
+        from_verse TEXT,
+        to_verse TEXT,
+        FOREIGN KEY(from_verse) REFERENCES verses(id),
+        FOREIGN KEY(to_verse) REFERENCES verses(id)
+    );
+
+    -- 8. User Data: Enhanced Notes
+    CREATE TABLE IF NOT EXISTS notes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        main_reference TEXT,
+        content TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- 9. User Data: Links between notes and specific verses
+    CREATE TABLE IF NOT EXISTS note_verses (
+        note_id INTEGER,
+        verse_id TEXT,
+        FOREIGN KEY(note_id) REFERENCES notes(id),
+        FOREIGN KEY(verse_id) REFERENCES verses(id)
+    );
+
+-- 10. Unified Geography Table
+CREATE TABLE IF NOT EXISTS locations (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    modern_name TEXT,
+    latitude REAL,
+    longitude REAL,
+    feature_type TEXT,
+    geometry_type TEXT,
+    image_file TEXT,      -- Internal filename (e.g., m39ac.jpg)
+    image_url TEXT,       -- Direct high-res link (e.g., Wikimedia)
+    credit_url TEXT,      -- Attribution link
+    image_author TEXT,    -- For the "Investigation" credits
+    source_info TEXT
+);
+
+-- 11. The Verse Bridge
+CREATE TABLE IF NOT EXISTS verse_locations (
+    verse_id TEXT,             -- e.g., '2KG.5.12'
+    location_id TEXT,
+    PRIMARY KEY (verse_id, location_id),
+    FOREIGN KEY(location_id) REFERENCES locations(id)
+); 
+
+-- 12. Books & Chapters (For Navigation)
+CREATE TABLE IF NOT EXISTS books (
+    id TEXT PRIMARY KEY,
+    osis_name TEXT,
+    book_name TEXT,
+    testament TEXT,
+    book_order INTEGER,
+    slug TEXT
+);
+
+CREATE TABLE IF NOT EXISTS chapters (
+    id TEXT PRIMARY KEY,
+    book_id TEXT,
+    osis_ref TEXT, -- e.g., 'Gen.1'
+    chapter_num INTEGER,
+    FOREIGN KEY(book_id) REFERENCES books(id)
+);
+
+-- 13. Historical People
+CREATE TABLE IF NOT EXISTS people (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    lookup_name TEXT,
+    gender TEXT,
+    birth_year INTEGER,
+    death_year INTEGER,
+    dictionary_text TEXT,
+    slug TEXT
+);
+
+-- 14. People Groups (Tribes/Nations)
+CREATE TABLE IF NOT EXISTS groups (
+    id TEXT PRIMARY KEY,
+    name TEXT
+);
+
+-- 15. Events (The Timeline)
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    start_date TEXT,
+    duration TEXT,
+    sort_key REAL
+);
+
+-- 16. The "Relational" Verse Table
+-- This is critical: Theographic uses its own IDs for verses. 
+-- We need this table to map 'rec7mkRL...' to 'Gen.1.1'
+CREATE TABLE IF NOT EXISTS verse_id_map (
+    rec_id TEXT PRIMARY KEY,
+    osis_ref TEXT
+);
+
+-- 17. Multi-Way Junction Tables (The Connections)
+CREATE TABLE IF NOT EXISTS event_participants (
+    event_id TEXT,
+    participant_id TEXT, -- Can be person_id or group_id
+    FOREIGN KEY(event_id) REFERENCES events(id)
+);
+
+CREATE TABLE IF NOT EXISTS group_memberships (
+    group_id TEXT,
+    person_id TEXT,
+    FOREIGN KEY(group_id) REFERENCES groups(id),
+    FOREIGN KEY(person_id) REFERENCES people(id)
+);
+
+-- 18. Bridge: Events to Verses (rec... to rec...)
+CREATE TABLE IF NOT EXISTS event_verses (
+    event_id TEXT,
+    verse_id TEXT, -- rec... ID
+    PRIMARY KEY (event_id, verse_id)
+);
+
+-- 19. Bridge: People to Verses (rec... to rec...)
+CREATE TABLE IF NOT EXISTS person_verses (
+    person_id TEXT,
+    verse_id TEXT, -- rec... ID
+    PRIMARY KEY (person_id, verse_id)
+);
+
+-- 20. Authentication Users
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    subject TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    role TEXT NOT NULL DEFAULT 'member',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    label TEXT,
+    scopes TEXT NOT NULL DEFAULT 'read',
+    active INTEGER NOT NULL DEFAULT 1,
+    last_used_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_token_hash ON api_keys(token_hash);
+CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
+    `
+
+	_, err := db.Exec(schema)
+	if err != nil {
+		log.Fatalf("Failed to create tables: %v", err)
+	}
+}
