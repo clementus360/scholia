@@ -6,6 +6,27 @@ import (
 	"strings"
 )
 
+func resolveCanonicalLocationID(db *sql.DB, locationID string) (string, error) {
+	locationID = strings.TrimSpace(locationID)
+	if locationID == "" {
+		return "", nil
+	}
+
+	var canonicalID string
+	err := db.QueryRow("SELECT canonical_location_id FROM location_aliases WHERE alias_id = ? LIMIT 1", locationID).Scan(&canonicalID)
+	if err == sql.ErrNoRows {
+		return locationID, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	canonicalID = strings.TrimSpace(canonicalID)
+	if canonicalID == "" {
+		return locationID, nil
+	}
+	return canonicalID, nil
+}
+
 var bsbCodeToTheoBook = map[string]string{
 	"GEN": "Gen", "EXO": "Exod", "LEV": "Lev", "NUM": "Num", "DEU": "Deut",
 	"JOS": "Josh", "JDG": "Judg", "RUT": "Ruth", "1SA": "1Sam", "2SA": "2Sam",
@@ -229,9 +250,14 @@ func GetLexiconByID(db *sql.DB, strongsID string) (*LexiconEntry, error) {
 }
 
 func GetLocationByID(db *sql.DB, locationID string) (*Location, error) {
+	canonicalID, err := resolveCanonicalLocationID(db, locationID)
+	if err != nil {
+		return nil, err
+	}
+
 	row := db.QueryRow(`
 		SELECT id, name, modern_name, latitude, longitude, feature_type, geometry_type, image_file, image_url, credit_url, image_author, source_info
-		FROM locations WHERE id = ?`, locationID)
+		FROM locations WHERE id = ?`, canonicalID)
 
 	var location Location
 	var latitude, longitude sql.NullFloat64
@@ -376,7 +402,63 @@ func GetLocationsByVerseID(db *sql.DB, verseID string) ([]Location, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return locations, nil
+
+	return dedupeLocations(locations), nil
+}
+
+func dedupeLocations(locations []Location) []Location {
+	if len(locations) <= 1 {
+		return locations
+	}
+
+	indexByKey := make(map[string]int)
+	deduped := make([]Location, 0, len(locations))
+
+	for _, loc := range locations {
+		key := locationIdentityKey(loc)
+		if idx, exists := indexByKey[key]; exists {
+			if locationQuality(loc) > locationQuality(deduped[idx]) {
+				deduped[idx] = loc
+			}
+			continue
+		}
+		indexByKey[key] = len(deduped)
+		deduped = append(deduped, loc)
+	}
+
+	return deduped
+}
+
+func locationIdentityKey(loc Location) string {
+	name := strings.ToLower(strings.TrimSpace(loc.Name))
+	name = strings.ReplaceAll(name, "-", " ")
+	name = strings.ReplaceAll(name, "_", " ")
+	name = strings.Join(strings.Fields(name), " ")
+	featureType := strings.ToLower(strings.TrimSpace(loc.FeatureType))
+	if name == "" {
+		return strings.ToLower(strings.TrimSpace(loc.ID))
+	}
+	return name + "|" + featureType
+}
+
+func locationQuality(loc Location) int {
+	score := 0
+	if loc.Latitude != nil || loc.Longitude != nil {
+		score += 3
+	}
+	if strings.TrimSpace(loc.ModernName) != "" {
+		score += 2
+	}
+	if strings.TrimSpace(loc.GeometryType) != "" {
+		score += 1
+	}
+	if strings.TrimSpace(loc.ImageURL) != "" {
+		score += 1
+	}
+	if strings.TrimSpace(loc.SourceInfo) != "" {
+		score += 1
+	}
+	return score
 }
 
 func GetPeopleByVerseID(db *sql.DB, verseID string) ([]Person, error) {

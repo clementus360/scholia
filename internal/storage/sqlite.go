@@ -148,6 +148,16 @@ CREATE TABLE IF NOT EXISTS verse_locations (
     FOREIGN KEY(location_id) REFERENCES locations(id)
 ); 
 
+-- 11b. Alias map for merged place identities across sources
+CREATE TABLE IF NOT EXISTS location_aliases (
+    alias_id TEXT PRIMARY KEY,
+    canonical_location_id TEXT NOT NULL,
+    source TEXT,
+    FOREIGN KEY(canonical_location_id) REFERENCES locations(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_location_aliases_canonical ON location_aliases(canonical_location_id);
+
 -- 12. Books & Chapters (For Navigation)
 CREATE TABLE IF NOT EXISTS books (
     id TEXT PRIMARY KEY,

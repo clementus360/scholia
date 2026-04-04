@@ -747,8 +747,59 @@ func parseLonLat(s string) (float64, float64) {
 	return lat, lon
 }
 
+func normalizeLocationName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return ""
+	}
+	name = strings.ReplaceAll(name, "-", " ")
+	name = strings.ReplaceAll(name, "_", " ")
+	return strings.Join(strings.Fields(name), " ")
+}
+
+func locationMergeKey(name, featureType string) string {
+	return normalizeLocationName(name) + "|" + strings.ToLower(strings.TrimSpace(featureType))
+}
+
+func loadLocationIndex(tx *sql.Tx) (map[string]string, map[string]string, error) {
+	rows, err := tx.Query("SELECT id, name, COALESCE(feature_type, '') FROM locations")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	byNameAndType := make(map[string]string)
+	byName := make(map[string]string)
+	for rows.Next() {
+		var id, name, featureType string
+		if err := rows.Scan(&id, &name, &featureType); err != nil {
+			return nil, nil, err
+		}
+		nameKey := normalizeLocationName(name)
+		if nameKey == "" {
+			continue
+		}
+		if _, exists := byName[nameKey]; !exists {
+			byName[nameKey] = id
+		}
+		if _, exists := byNameAndType[locationMergeKey(name, featureType)]; !exists {
+			byNameAndType[locationMergeKey(name, featureType)] = id
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return byNameAndType, byName, nil
+}
+
 func SeedTheographicData(db *sql.DB, baseDir string) {
 	tx, _ := db.Begin()
+	nameTypeToCanonical, nameToCanonical, err := loadLocationIndex(tx)
+	if err != nil {
+		log.Printf("⚠️ Could not load location normalization index: %v", err)
+		nameTypeToCanonical = map[string]string{}
+		nameToCanonical = map[string]string{}
+	}
 
 	// 1. Map Verse IDs (THE TRANSLATOR)
 	seedFile(baseDir+"/verses.json", func(id string, f map[string]interface{}) {
@@ -786,18 +837,53 @@ func SeedTheographicData(db *sql.DB, baseDir string) {
 
 	// 4. Seed Places (Fixed: Using kjvName and featureType)
 	seedFile(baseDir+"/places.json", func(id string, f map[string]interface{}) {
+		name := getString(f, "kjvName")
+		featureType := getString(f, "featureType")
 		desc := ""
 		if d, ok := f["dictText"].([]interface{}); ok && len(d) > 0 {
 			desc = d[0].(string)
 		}
-		tx.Exec(`INSERT OR REPLACE INTO locations (id, name, feature_type, source_info) 
+
+		targetID := id
+		if canonical, ok := nameTypeToCanonical[locationMergeKey(name, featureType)]; ok {
+			targetID = canonical
+		} else if canonical, ok := nameToCanonical[normalizeLocationName(name)]; ok {
+			targetID = canonical
+		}
+
+		if targetID == id {
+			tx.Exec(`INSERT OR REPLACE INTO locations (id, name, feature_type, source_info) 
 				VALUES (?, ?, ?, ?)`,
-			id, getString(f, "kjvName"), getString(f, "featureType"), desc)
+				id, name, featureType, desc)
+
+			nameKey := normalizeLocationName(name)
+			if nameKey != "" {
+				if _, exists := nameToCanonical[nameKey]; !exists {
+					nameToCanonical[nameKey] = id
+				}
+				if _, exists := nameTypeToCanonical[locationMergeKey(name, featureType)]; !exists {
+					nameTypeToCanonical[locationMergeKey(name, featureType)] = id
+				}
+			}
+		} else {
+			tx.Exec(`INSERT OR REPLACE INTO location_aliases (alias_id, canonical_location_id, source)
+				VALUES (?, ?, ?)`, id, targetID, "theographic")
+
+			tx.Exec(`UPDATE locations
+				SET feature_type = CASE WHEN COALESCE(feature_type, '') = '' THEN ? ELSE feature_type END,
+					source_info = CASE
+						WHEN ? = '' THEN source_info
+						WHEN COALESCE(source_info, '') = '' THEN ?
+						WHEN instr(source_info, ?) > 0 THEN source_info
+						ELSE source_info || '\n\n' || ?
+					END
+				WHERE id = ?`, featureType, desc, desc, desc, desc, targetID)
+		}
 
 		// Link Place to Verses
 		if verses, ok := f["verses"].([]interface{}); ok {
 			for _, vID := range verses {
-				tx.Exec("INSERT OR IGNORE INTO verse_locations (location_id, verse_id) VALUES (?, ?)", id, vID)
+				tx.Exec("INSERT OR IGNORE INTO verse_locations (location_id, verse_id) VALUES (?, ?)", targetID, vID)
 			}
 		}
 	})

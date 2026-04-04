@@ -226,7 +226,12 @@ func GetPersonVerses(db *sql.DB, personID string, limit, offset int) ([]Verse, e
 }
 
 func GetLocationVerses(db *sql.DB, locationID string, limit, offset int) ([]Verse, error) {
-	rows, err := db.Query("SELECT verse_id FROM verse_locations WHERE location_id = ? ORDER BY verse_id ASC LIMIT ? OFFSET ?", locationID, limit, offset)
+	canonicalID, err := resolveCanonicalLocationID(db, locationID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.Query("SELECT verse_id FROM verse_locations WHERE location_id = ? ORDER BY verse_id ASC LIMIT ? OFFSET ?", canonicalID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
