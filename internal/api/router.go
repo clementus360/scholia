@@ -5,6 +5,7 @@ import (
 
 	"github.com/clementus360/scholia/internal/auth"
 	"github.com/clementus360/scholia/internal/handlers"
+	httputil "github.com/clementus360/scholia/internal/http"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -16,6 +17,7 @@ func NewRouter(db *sql.DB, authManager *auth.Manager) chi.Router {
 	// Global middleware
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(httputil.CORS(nil))
 	if authManager != nil {
 		r.Use(authManager.Optional)
 	}

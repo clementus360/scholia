@@ -19,6 +19,12 @@ func NewLexiconHandler(db *sql.DB) *LexiconHandler {
 
 func (h *LexiconHandler) GetLexicon(w http.ResponseWriter, r *http.Request) {
 	strongsID := chi.URLParam(r, "strongs_id")
+	pagination, err := httputil.ParsePagination(r, 25, 100)
+	if err != nil {
+		httputil.Error(w, "Invalid pagination parameters", http.StatusBadRequest)
+		return
+	}
+
 	entry, err := storage.GetLexiconByID(h.db, strongsID)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
@@ -28,5 +34,18 @@ func (h *LexiconHandler) GetLexicon(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, "Lexicon entry not found", http.StatusNotFound)
 		return
 	}
-	httputil.Success(w, entry, http.StatusOK)
+
+	occurrences, err := storage.GetLexiconOccurrencesByID(h.db, strongsID, pagination.Limit, pagination.Offset)
+	if err != nil {
+		httputil.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	httputil.Success(w, struct {
+		storage.LexiconEntry
+		Occurrences []storage.LexiconOccurrence `json:"occurrences"`
+	}{
+		LexiconEntry: *entry,
+		Occurrences:  occurrences,
+	}, http.StatusOK, httputil.PaginationMeta(pagination, len(occurrences)))
 }

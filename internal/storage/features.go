@@ -55,6 +55,16 @@ type ResolveResult struct {
 	Data interface{} `json:"data"`
 }
 
+type LexiconOccurrence struct {
+	VerseID        string           `json:"verse_id"`
+	WordOrder      int              `json:"word_order"`
+	SurfaceWord    string           `json:"surface_word"`
+	EnglishGloss   string           `json:"english_gloss"`
+	MorphCode      string           `json:"morph_code"`
+	ManuscriptType string           `json:"manuscript_type"`
+	Morphology     *MorphologyEntry `json:"morphology,omitempty"`
+}
+
 func SearchVerses(db *sql.DB, q string, limit, offset int) ([]SearchVerseResult, error) {
 	rows, err := db.Query(`
 		SELECT v.id, COALESCE(v.translation, ''), COALESCE(v.book, ''), COALESCE(v.chapter, 0), COALESCE(v.verse, 0), COALESCE(v.text, '')
@@ -433,6 +443,61 @@ func ListTimeline(db *sql.DB, limit, offset int) ([]Event, error) {
 
 func GetAnalysisByVerseID(db *sql.DB, verseID string) ([]VerseAnalysisToken, error) {
 	return GetVerseAnalysisByVerseID(db, verseID)
+}
+
+func GetLexiconOccurrencesByID(db *sql.DB, strongsID string, limit, offset int) ([]LexiconOccurrence, error) {
+	rows, err := db.Query(`
+		SELECT
+			va.verse_id,
+			va.word_order,
+			va.surface_word,
+			va.english_gloss,
+			COALESCE(va.morph_code, ''),
+			COALESCE(va.manuscript_type, ''),
+			COALESCE(m.code, ''),
+			COALESCE(m.short_def, ''),
+			COALESCE(m.long_exp, '')
+		FROM verse_analysis va
+		LEFT JOIN morphology m ON m.code = va.morph_code
+		WHERE va.strongs_id = ?
+		ORDER BY va.verse_id ASC, va.word_order ASC
+		LIMIT ? OFFSET ?`, strongsID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	occurrences := make([]LexiconOccurrence, 0)
+	for rows.Next() {
+		var occurrence LexiconOccurrence
+		var morphID, morphShort, morphLong string
+		if err := rows.Scan(
+			&occurrence.VerseID,
+			&occurrence.WordOrder,
+			&occurrence.SurfaceWord,
+			&occurrence.EnglishGloss,
+			&occurrence.MorphCode,
+			&occurrence.ManuscriptType,
+			&morphID,
+			&morphShort,
+			&morphLong,
+		); err != nil {
+			return nil, err
+		}
+
+		if morphID != "" {
+			occurrence.Morphology = &MorphologyEntry{
+				Code:     morphID,
+				ShortDef: morphShort,
+				LongExp:  morphLong,
+			}
+		}
+		occurrences = append(occurrences, occurrence)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return occurrences, nil
 }
 
 func ResolveRecID(db *sql.DB, recID string) (*ResolveResult, error) {

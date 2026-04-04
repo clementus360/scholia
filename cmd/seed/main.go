@@ -102,6 +102,23 @@ func getString(fields map[string]interface{}, key string) string {
 	return ""
 }
 
+func getYear(fields map[string]interface{}, key string) (int, bool) {
+	if val, ok := fields[key].(float64); ok {
+		return int(val), true
+	}
+	if val, ok := fields[key].(string); ok {
+		val = strings.TrimSpace(val)
+		if val == "" {
+			return 0, false
+		}
+		parsed, err := strconv.Atoi(val)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
 // --- UTILS ---
 
 func getBookCode(name string) string {
@@ -793,15 +810,15 @@ func SeedTheographicData(db *sql.DB, baseDir string) {
 			dictionaryText = d[0].(string)
 		}
 
-		// FIX 2: Use minYear/maxYear if birthYear/deathYear are missing
-		bYear := 0
-		if val, ok := f["minYear"].(float64); ok {
-			bYear = int(val)
+		// Prefer explicit lifespan fields; use min/max as fallback only.
+		bYear, ok := getYear(f, "birthYear")
+		if !ok {
+			bYear, _ = getYear(f, "minYear")
 		}
 
-		dYear := 0
-		if val, ok := f["maxYear"].(float64); ok {
-			dYear = int(val)
+		dYear, ok := getYear(f, "deathYear")
+		if !ok {
+			dYear, _ = getYear(f, "maxYear")
 		}
 
 		// EXECUTE INSERT

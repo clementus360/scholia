@@ -100,7 +100,38 @@ Currently, write operations for notes require `write` scope:
 
 Read routes remain public.
 
-## 4. Pagination
+## 4. CORS for Local Testing
+
+The backend includes a small CORS layer so browser-based frontend apps can call it from local dev servers.
+
+### Default allowed origins
+
+- `http://localhost:3000`
+- `http://127.0.0.1:3000`
+- `http://localhost:4173`
+- `http://127.0.0.1:4173`
+- `http://localhost:5173`
+- `http://127.0.0.1:5173`
+- `http://localhost:8080`
+- `http://127.0.0.1:8080`
+
+### Customize allowed origins
+
+Set `SCHOLIA_CORS_ORIGINS` to a comma-separated list.
+
+Example:
+
+```bash
+export SCHOLIA_CORS_ORIGINS="http://localhost:3000,http://localhost:5173"
+```
+
+### Notes
+
+- `Authorization` and `X-API-Key` headers are allowed.
+- Preflight `OPTIONS` requests are handled automatically.
+- If you need to allow every origin temporarily, set `SCHOLIA_CORS_ORIGINS=*`.
+
+## 5. Pagination
 
 For paginated endpoints, use query params:
 
@@ -115,7 +146,7 @@ GET /api/v1/books?limit=20&offset=40
 
 Pagination metadata is returned in `meta`.
 
-## 5. Canonical ID Behavior
+## 6. Canonical ID Behavior
 
 - Verse IDs are normalized at the boundary (for example `gen.1.1` -> `GEN.1.1`).
 - Book slugs are normalized to lowercase.
@@ -123,7 +154,7 @@ Pagination metadata is returned in `meta`.
 
 This helps clients send user-entered IDs without perfect casing.
 
-## 6. Endpoint Map
+## 7. Endpoint Map
 
 ### Verse and analysis
 
@@ -139,7 +170,9 @@ This helps clients send user-entered IDs without perfect casing.
 
 ### Lexicon
 
-- `GET /lexicon/{strongs_id}`
+- `GET /lexicon/{strongs_id}?limit=...&offset=...`
+
+This route now returns the lexicon entry plus an `occurrences` array from verse analysis. That lets the frontend show both the meaning and the actual word usage.
 
 ### Geography
 
@@ -173,7 +206,270 @@ This helps clients send user-entered IDs without perfect casing.
 - `PUT /notes/{note_id}` (auth required)
 - `DELETE /notes/{note_id}` (auth required)
 
-## 7. Notes Payloads
+## 8. Response Structures
+
+Below are practical TypeScript shapes for the most-used response payloads.
+
+### Shared envelope
+
+```ts
+type ApiError = { message: string };
+
+type ApiMeta = {
+  limit?: number;
+  offset?: number;
+  count?: number;
+  verses_count?: number;
+  entities_count?: number;
+  notes_count?: number;
+  cross_references_count?: number;
+  people_count?: number;
+  groups_count?: number;
+};
+
+type ApiEnvelope<T> = {
+  success: boolean;
+  data?: T;
+  error?: ApiError;
+  meta?: ApiMeta;
+};
+```
+
+### Core domain models
+
+```ts
+type Verse = {
+  id: string;
+  translation: string;
+  book: string;
+  chapter: number;
+  verse: number;
+  text: string;
+};
+
+type Note = {
+  id: number;
+  title: string;
+  main_reference: string;
+  content: string;
+  verse_ids?: string[];
+  created_at?: string;
+  updated_at?: string;
+};
+
+type Person = {
+  id: string;
+  name: string;
+  lookup_name: string;
+  gender: string;
+  birth_year: number;
+  death_year: number;
+  dictionary_text: string;
+  slug: string;
+};
+
+type Group = { id: string; name: string };
+
+type Event = {
+  id: string;
+  title: string;
+  start_date: string;
+  duration: string;
+  sort_key: number;
+};
+
+type Location = {
+  id: string;
+  name: string;
+  modern_name: string;
+  latitude?: number;
+  longitude?: number;
+  feature_type: string;
+  geometry_type: string;
+  image_file: string;
+  image_url: string;
+  credit_url: string;
+  image_author: string;
+  source_info: string;
+};
+
+type LexiconData = LexiconEntry & {
+  occurrences: LexiconOccurrence[];
+};
+
+type LexiconOccurrence = {
+  verse_id: string;
+  word_order: number;
+  surface_word: string;
+  english_gloss: string;
+  morph_code: string;
+  manuscript_type: string;
+  morphology?: MorphologyEntry;
+};
+```
+
+### Lexicon example
+
+```ts
+type LexiconResponse = ApiEnvelope<LexiconData>;
+
+const example: LexiconData = {
+  strongs_id: "G3056",
+  word: "λόγος",
+  transliteration: "logos",
+  definition: "word, saying, message, discourse",
+  occurrences: [
+    {
+      verse_id: "1CO.1.18",
+      word_order: 2,
+      surface_word: "λόγος",
+      english_gloss: "message",
+      morph_code: "N-NSM",
+      manuscript_type: "NKO",
+      morphology: {
+        code: "N-NSM",
+        short_def: "Noun Nominative Singular Masculine",
+        long_exp: "a male PERSON OR THING that is doing something",
+      },
+    },
+  ],
+};
+```
+
+Frontend usage pattern:
+
+- Render `word` and `transliteration` in the header.
+- Render `definition` as the main gloss.
+- Render `occurrences` as a list or table of actual verse hits.
+- Use `surface_word` + `english_gloss` to show word-by-word meaning, not just dictionary meaning.
+
+### Endpoint-specific `data` shapes
+
+```ts
+// GET /books
+type BooksData = Book[];
+type Book = {
+  id: string;
+  osis_name: string;
+  book_name: string;
+  testament: string;
+  book_order: number;
+  slug: string;
+};
+
+// GET /books/{slug}/chapters
+type BookChaptersData = {
+  book: Book;
+  chapter_count: number;
+  chapters: Chapter[];
+};
+type Chapter = {
+  id: string;
+  book_id: string;
+  osis_ref: string;
+  chapter_num: number;
+};
+
+// GET /verse/{osis_id}
+type VerseData = Verse;
+
+// GET /verse/{osis_id}/cross-references
+type VerseCrossRefsData = {
+  verse_id: string;
+  cross_references: string[];
+};
+
+// GET /analysis/{osis_id}
+type VerseAnalysisData = {
+  verse: Verse;
+  analysis: VerseAnalysisToken[];
+};
+type VerseAnalysisToken = {
+  word_order: number;
+  surface_word: string;
+  english_gloss: string;
+  strongs_id: string;
+  morph_code: string;
+  manuscript_type: string;
+  lexicon?: LexiconEntry;
+  morphology?: MorphologyEntry;
+};
+type LexiconEntry = {
+  strongs_id: string;
+  word: string;
+  transliteration: string;
+  definition: string;
+};
+type MorphologyEntry = {
+  code: string;
+  short_def: string;
+  long_exp: string;
+};
+
+// GET /verse/{osis_id}/context
+type VerseContextData = {
+  verse: Verse;
+  analysis: VerseAnalysisToken[];
+  lexicon: LexiconEntry[];
+  locations: Location[];
+  people: Person[];
+  groups: Group[];
+  events: Event[];
+  cross_references: string[];
+  notes: Note[];
+};
+
+// GET /search
+type SearchData = {
+  query: string;
+  type: "all" | "verse" | "entity";
+  verses?: SearchVerseResult[];
+  entities?: SearchEntityResult[];
+};
+type SearchVerseResult = Verse;
+type SearchEntityResult = {
+  type: "person" | "location" | "event";
+  id: string;
+  name: string;
+  extra?: string;
+};
+
+// GET /suggest
+type SuggestData = {
+  query: string;
+  suggestions: Suggestion[];
+};
+type Suggestion = {
+  type: "person" | "location" | "lexicon" | "event";
+  id: string;
+  value: string;
+};
+
+// GET /event/{event_id}/participants
+type EventParticipantsData = {
+  event_id: string;
+  participants: {
+    people: Person[];
+    groups: Group[];
+  };
+};
+
+// GET /auth/me
+type AuthMeData =
+  | { authenticated: false }
+  | {
+      type: "api-key";
+      user_id: string;
+      key_id: string;
+      subject: string;
+      display_name?: string;
+      scopes: string[];
+      authenticated: true;
+      authentication: "api-key";
+    };
+```
+
+## 9. Notes Payloads
 
 ### Create note request
 
@@ -190,7 +486,7 @@ This helps clients send user-entered IDs without perfect casing.
 
 Same shape as create.
 
-## 8. Frontend Integration Pattern
+## 10. Frontend Integration Pattern
 
 Use one HTTP helper to consistently handle auth and envelope parsing.
 
@@ -225,7 +521,7 @@ async function apiFetch<T>(
 }
 ```
 
-## 9. Local Dev Auth Defaults
+## 11. Local Dev Auth Defaults
 
 If no auth env vars are configured, bootstrap creates a dev API key:
 
@@ -237,7 +533,7 @@ Recommended for real environments:
 2. Store keys in secrets manager, not in frontend code.
 3. Prefer a backend proxy for privileged operations.
 
-## 10. Quick Test Commands
+## 12. Quick Test Commands
 
 ```bash
 # Public read
