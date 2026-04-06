@@ -3,6 +3,8 @@ package storage
 import (
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -63,6 +65,82 @@ type LexiconOccurrence struct {
 	MorphCode      string           `json:"morph_code"`
 	ManuscriptType string           `json:"manuscript_type"`
 	Morphology     *MorphologyEntry `json:"morphology,omitempty"`
+}
+
+type VerseRangeResult struct {
+	Reference string  `json:"reference"`
+	Start     string  `json:"start"`
+	End       string  `json:"end"`
+	Verses    []Verse `json:"verses"`
+}
+
+var verseBookNames = map[string]string{
+	"GEN": "Genesis",
+	"EXO": "Exodus",
+	"LEV": "Leviticus",
+	"NUM": "Numbers",
+	"DEU": "Deuteronomy",
+	"JOS": "Joshua",
+	"JDG": "Judges",
+	"RUT": "Ruth",
+	"1SA": "1 Samuel",
+	"2SA": "2 Samuel",
+	"1KI": "1 Kings",
+	"2KI": "2 Kings",
+	"1CH": "1 Chronicles",
+	"2CH": "2 Chronicles",
+	"EZR": "Ezra",
+	"NEH": "Nehemiah",
+	"EST": "Esther",
+	"JOB": "Job",
+	"PSA": "Psalms",
+	"PRO": "Proverbs",
+	"ECC": "Ecclesiastes",
+	"SNG": "Song of Solomon",
+	"ISA": "Isaiah",
+	"JER": "Jeremiah",
+	"LAM": "Lamentations",
+	"EZK": "Ezekiel",
+	"DAN": "Daniel",
+	"HOS": "Hosea",
+	"JOL": "Joel",
+	"AMO": "Amos",
+	"OBA": "Obadiah",
+	"JON": "Jonah",
+	"MIC": "Micah",
+	"NAM": "Nahum",
+	"HAB": "Habakkuk",
+	"ZEP": "Zephaniah",
+	"HAG": "Haggai",
+	"ZEC": "Zechariah",
+	"MAL": "Malachi",
+	"MAT": "Matthew",
+	"MRK": "Mark",
+	"LUK": "Luke",
+	"JHN": "John",
+	"ACT": "Acts",
+	"ROM": "Romans",
+	"1CO": "1 Corinthians",
+	"2CO": "2 Corinthians",
+	"GAL": "Galatians",
+	"EPH": "Ephesians",
+	"PHP": "Philippians",
+	"COL": "Colossians",
+	"1TH": "1 Thessalonians",
+	"2TH": "2 Thessalonians",
+	"1TI": "1 Timothy",
+	"2TI": "2 Timothy",
+	"TIT": "Titus",
+	"PHM": "Philemon",
+	"HEB": "Hebrews",
+	"JAS": "James",
+	"1PE": "1 Peter",
+	"2PE": "2 Peter",
+	"1JO": "1 John",
+	"2JO": "2 John",
+	"3JO": "3 John",
+	"JUD": "Jude",
+	"REV": "Revelation",
 }
 
 func SearchVerses(db *sql.DB, q string, limit, offset int) ([]SearchVerseResult, error) {
@@ -550,6 +628,139 @@ func resolveVerseRefs(db *sql.DB, refs []string) ([]Verse, error) {
 	return verses, nil
 }
 
+func ExpandVerseReferences(db *sql.DB, references []string) ([]string, []string, error) {
+	resolved := make([]string, 0)
+	unresolved := make([]string, 0)
+	seen := map[string]struct{}{}
+
+	for _, reference := range references {
+		reference = strings.TrimSpace(reference)
+		if reference == "" {
+			continue
+		}
+
+		result, err := GetVerseRangeByReference(db, reference)
+		if err != nil {
+			return nil, nil, err
+		}
+		if result == nil || len(result.Verses) == 0 {
+			unresolved = append(unresolved, reference)
+			continue
+		}
+
+		for _, verse := range result.Verses {
+			id := strings.ToUpper(strings.TrimSpace(verse.ID))
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			resolved = append(resolved, id)
+		}
+	}
+
+	return resolved, unresolved, nil
+}
+
+func GetVerseRangeByReference(db *sql.DB, reference string) (*VerseRangeResult, error) {
+	reference = strings.TrimSpace(reference)
+	if reference == "" {
+		return nil, nil
+	}
+
+	if strings.Count(reference, "-") == 0 {
+		verse, err := getVerseByAnyID(db, reference)
+		if err != nil {
+			return nil, err
+		}
+		if verse == nil {
+			if book, chapter, verseNum, ok := parseVerseToken(reference, "", 0); ok {
+				verse, err = getVerseByBookChapterVerse(db, book, chapter, verseNum)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		if verse == nil {
+			return nil, nil
+		}
+		return &VerseRangeResult{
+			Reference: reference,
+			Start:     verse.ID,
+			End:       verse.ID,
+			Verses:    []Verse{*verse},
+		}, nil
+	}
+
+	startRaw, endRaw, found := strings.Cut(reference, "-")
+	if !found {
+		return nil, fmt.Errorf("invalid verse reference")
+	}
+
+	startVerse, err := resolveReferenceToken(db, startRaw, "", 0)
+	if err != nil {
+		return nil, err
+	}
+	if startVerse == nil {
+		return nil, nil
+	}
+
+	endVerse, err := resolveReferenceToken(db, endRaw, startVerse.Book, startVerse.Chapter)
+	if err != nil {
+		return nil, err
+	}
+	if endVerse == nil {
+		return nil, nil
+	}
+
+	if startVerse.Book != endVerse.Book {
+		return nil, fmt.Errorf("verse ranges must stay within one book")
+	}
+	if endVerse.Chapter < startVerse.Chapter || (endVerse.Chapter == startVerse.Chapter && endVerse.Verse < startVerse.Verse) {
+		return nil, fmt.Errorf("invalid verse range")
+	}
+
+	rows, err := db.Query(`
+		SELECT id, translation, book, chapter, verse, text
+		FROM verses
+		WHERE book = ?
+		AND (
+			chapter > ? OR (chapter = ? AND verse >= ?)
+		)
+		AND (
+			chapter < ? OR (chapter = ? AND verse <= ?)
+		)
+		ORDER BY chapter ASC, verse ASC`, startVerse.Book, startVerse.Chapter, startVerse.Chapter, startVerse.Verse, endVerse.Chapter, endVerse.Chapter, endVerse.Verse)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	verses := make([]Verse, 0)
+	for rows.Next() {
+		var verse Verse
+		if err := rows.Scan(&verse.ID, &verse.Translation, &verse.Book, &verse.Chapter, &verse.Verse, &verse.Text); err != nil {
+			return nil, err
+		}
+		verses = append(verses, verse)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(verses) == 0 {
+		return nil, nil
+	}
+
+	return &VerseRangeResult{
+		Reference: reference,
+		Start:     startVerse.ID,
+		End:       endVerse.ID,
+		Verses:    verses,
+	}, nil
+}
+
 func getVerseByAnyID(db *sql.DB, rawID string) (*Verse, error) {
 	if rawID == "" {
 		return nil, nil
@@ -581,6 +792,169 @@ func getVerseByAnyID(db *sql.DB, rawID string) (*Verse, error) {
 	}
 
 	return nil, nil
+}
+
+func resolveReferenceToken(db *sql.DB, token string, defaultBook string, defaultChapter int) (*Verse, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, nil
+	}
+
+	if verse, err := getVerseByAnyID(db, token); err != nil {
+		return nil, err
+	} else if verse != nil {
+		return verse, nil
+	}
+
+	book, chapter, verseNum, ok := parseVerseToken(token, defaultBook, defaultChapter)
+	if !ok {
+		return nil, nil
+	}
+
+	return getVerseByBookChapterVerse(db, book, chapter, verseNum)
+}
+
+func getVerseByBookChapterVerse(db *sql.DB, book string, chapter, verseNum int) (*Verse, error) {
+	if book == "" || chapter <= 0 || verseNum <= 0 {
+		return nil, nil
+	}
+
+	row := db.QueryRow(`
+		SELECT id, translation, book, chapter, verse, text
+		FROM verses
+		WHERE book = ? AND chapter = ? AND verse = ?
+		LIMIT 1`, book, chapter, verseNum)
+
+	verse := &Verse{}
+	var id, translation, rowBook, text sql.NullString
+	var rowChapter, rowVerse sql.NullInt64
+	if err := row.Scan(&id, &translation, &rowBook, &rowChapter, &rowVerse, &text); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if id.Valid {
+		verse.ID = id.String
+	}
+	if translation.Valid {
+		verse.Translation = translation.String
+	}
+	if rowBook.Valid {
+		verse.Book = rowBook.String
+	}
+	if rowChapter.Valid {
+		verse.Chapter = int(rowChapter.Int64)
+	}
+	if rowVerse.Valid {
+		verse.Verse = int(rowVerse.Int64)
+	}
+	if text.Valid {
+		verse.Text = text.String
+	}
+
+	return verse, nil
+}
+
+var humanVersePattern = regexp.MustCompile(`(?i)^(.+?)\s+(\d+):(\d+)$`)
+
+func parseVerseToken(token string, defaultBook string, defaultChapter int) (string, int, int, bool) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", 0, 0, false
+	}
+
+	if verse := parseDotVerseToken(token); verse != nil {
+		return verse.book, verse.chapter, verse.verse, true
+	}
+
+	if match := humanVersePattern.FindStringSubmatch(token); len(match) == 4 {
+		book := resolveBookName(match[1])
+		if book == "" {
+			return "", 0, 0, false
+		}
+		chapter, err1 := strconv.Atoi(match[2])
+		verseNum, err2 := strconv.Atoi(match[3])
+		if err1 != nil || err2 != nil {
+			return "", 0, 0, false
+		}
+		return book, chapter, verseNum, true
+	}
+
+	if defaultBook != "" && defaultChapter > 0 {
+		if strings.Contains(token, ":") {
+			parts := strings.Split(token, ":")
+			if len(parts) == 2 {
+				chapter, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+				verseNum, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+				if err1 == nil && err2 == nil {
+					return defaultBook, chapter, verseNum, true
+				}
+			}
+		}
+		if verseNum, err := strconv.Atoi(token); err == nil {
+			return defaultBook, defaultChapter, verseNum, true
+		}
+	}
+
+	return "", 0, 0, false
+}
+
+type dotVerseToken struct {
+	book    string
+	chapter int
+	verse   int
+}
+
+func parseDotVerseToken(token string) *dotVerseToken {
+	parts := strings.Split(token, ".")
+	if len(parts) == 3 {
+		chapter, err1 := strconv.Atoi(strings.TrimSpace(parts[1]))
+		verseNum, err2 := strconv.Atoi(strings.TrimSpace(parts[2]))
+		book := resolveBookName(parts[0])
+		if err1 == nil && err2 == nil && book != "" {
+			return &dotVerseToken{book: book, chapter: chapter, verse: verseNum}
+		}
+	}
+	if len(parts) == 4 {
+		chapter, err1 := strconv.Atoi(strings.TrimSpace(parts[2]))
+		verseNum, err2 := strconv.Atoi(strings.TrimSpace(parts[3]))
+		book := resolveBookName(parts[1])
+		if err1 == nil && err2 == nil && book != "" {
+			return &dotVerseToken{book: book, chapter: chapter, verse: verseNum}
+		}
+	}
+	return nil
+}
+
+func resolveBookName(token string) string {
+	token = strings.ToUpper(strings.TrimSpace(token))
+	if token == "" {
+		return ""
+	}
+
+	if name, ok := bsbCodeToTheoBook[token]; ok {
+		if fullName, ok := verseBookNames[token]; ok {
+			return fullName
+		}
+		return name
+	}
+
+	reverse := map[string]string{}
+	for code, name := range bsbCodeToTheoBook {
+		reverse[strings.ToUpper(name)] = code
+	}
+	if code, ok := reverse[token]; ok {
+		if fullName, ok := verseBookNames[code]; ok {
+			return fullName
+		}
+		if name, ok := bsbCodeToTheoBook[code]; ok {
+			return name
+		}
+	}
+
+	return ""
 }
 
 func normalizeToBSBVerseID(input string) (string, bool) {

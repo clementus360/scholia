@@ -3,9 +3,9 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 
 	httputil "github.com/clementus360/scholia/internal/http"
 	"github.com/clementus360/scholia/internal/storage"
@@ -68,11 +68,21 @@ func (h *NotesHandler) CreateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	verseIDs, unresolved, err := storage.ExpandVerseReferences(h.db, input.VerseIDs)
+	if err != nil {
+		httputil.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if len(unresolved) > 0 {
+		httputil.Error(w, fmt.Sprintf("Unresolved verse reference(s): %s", unresolved[0]), http.StatusBadRequest)
+		return
+	}
+
 	note := &storage.Note{
 		Title:         input.Title,
 		MainReference: input.MainReference,
 		Content:       input.Content,
-		VerseIDs:      normalizeVerseIDs(input.VerseIDs),
+		VerseIDs:      verseIDs,
 	}
 
 	noteID, err := storage.CreateNote(h.db, note)
@@ -102,12 +112,22 @@ func (h *NotesHandler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	verseIDs, unresolved, err := storage.ExpandVerseReferences(h.db, input.VerseIDs)
+	if err != nil {
+		httputil.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if len(unresolved) > 0 {
+		httputil.Error(w, fmt.Sprintf("Unresolved verse reference(s): %s", unresolved[0]), http.StatusBadRequest)
+		return
+	}
+
 	err = storage.UpdateNote(h.db, &storage.Note{
 		ID:            noteID,
 		Title:         input.Title,
 		MainReference: input.MainReference,
 		Content:       input.Content,
-		VerseIDs:      normalizeVerseIDs(input.VerseIDs),
+		VerseIDs:      verseIDs,
 	})
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -144,21 +164,4 @@ func (h *NotesHandler) DeleteNote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httputil.Success(w, map[string]any{"deleted": true, "note_id": noteID}, http.StatusOK)
-}
-
-func normalizeVerseIDs(verseIDs []string) []string {
-	normalized := make([]string, 0, len(verseIDs))
-	seen := map[string]struct{}{}
-	for _, verseID := range verseIDs {
-		canonical := strings.ToUpper(strings.TrimSpace(verseID))
-		if canonical == "" {
-			continue
-		}
-		if _, ok := seen[canonical]; ok {
-			continue
-		}
-		seen[canonical] = struct{}{}
-		normalized = append(normalized, canonical)
-	}
-	return normalized
 }

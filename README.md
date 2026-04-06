@@ -163,6 +163,23 @@ This helps clients send user-entered IDs without perfect casing.
 - `GET /verse/{osis_id}/cross-references`
 - `GET /analysis/{osis_id}`
 
+`GET /verse/{osis_id}`, `GET /verse/{osis_id}/context`, `GET /verse/{osis_id}/cross-references`, and `GET /analysis/{osis_id}` now accept either a single verse or a verse range.
+
+Examples:
+
+- Single verse: `GET /api/v1/verse/BSB.MAT.1.1`
+- Human-readable single verse: `GET /api/v1/verse/John%201:1`
+- Verse range: `GET /api/v1/verse/John%201:1-5`
+
+Single-verse requests keep the existing response shape.
+
+Range requests:
+
+- `/verse/{osis_id}` returns `reference`, `start`, `end`, and `verses`.
+- `/verse/{osis_id}/context` returns the same range fields plus aggregated entities (`people`, `groups`, `locations`, `events`, `lexicon`, `notes`, `cross_references`) and `analysis_by_verse`. It also includes legacy keys `verse` and flattened `analysis` for backward compatibility.
+- `/verse/{osis_id}/cross-references` returns range fields plus `cross_references`, and includes `verse_id` for backward compatibility.
+- `/analysis/{osis_id}` returns range fields plus `analysis_by_verse`, and also includes legacy keys `verse` and flattened `analysis`.
+
 ### Discovery
 
 - `GET /search?q=...&type=all|verse|entity&limit=...&offset=...`
@@ -245,6 +262,48 @@ type Verse = {
   chapter: number;
   verse: number;
   text: string;
+};
+
+type VerseRange = {
+  reference: string;
+  start: string;
+  end: string;
+  verses: Verse[];
+};
+
+type VerseRangeCrossRefs = {
+  reference: string;
+  start: string;
+  end: string;
+  verse_id?: string;
+  cross_references: string[];
+};
+
+type VerseRangeAnalysis = {
+  reference: string;
+  start: string;
+  end: string;
+  verse?: Verse;
+  verses: Verse[];
+  analysis: VerseAnalysisToken[];
+  analysis_by_verse: Record<string, VerseAnalysisToken[]>;
+};
+
+type VerseRangeContext = {
+  reference: string;
+  start: string;
+  end: string;
+  verse?: Verse;
+  verses: Verse[];
+  analysis: VerseAnalysisToken[];
+  analysis_by_verse: Record<string, VerseAnalysisToken[]>;
+  lexicon: LexiconEntry[];
+  locations: Location[];
+  people: Person[];
+  groups: Group[];
+  events: Event[];
+  cross_references: string[];
+  notes: Note[];
 };
 
 type Note = {
@@ -378,12 +437,14 @@ type VerseCrossRefsData = {
   verse_id: string;
   cross_references: string[];
 };
+type VerseCrossRefsRangeData = VerseRangeCrossRefs;
 
 // GET /analysis/{osis_id}
 type VerseAnalysisData = {
   verse: Verse;
   analysis: VerseAnalysisToken[];
 };
+type VerseAnalysisRangeData = VerseRangeAnalysis;
 type VerseAnalysisToken = {
   word_order: number;
   surface_word: string;
@@ -418,6 +479,7 @@ type VerseContextData = {
   cross_references: string[];
   notes: Note[];
 };
+type VerseContextRangeData = VerseRangeContext;
 
 // GET /search
 type SearchData = {
@@ -481,6 +543,14 @@ type AuthMeData =
   "verse_ids": ["GEN.1.1", "JHN.1.1"]
 }
 ```
+
+`verse_ids` supports both single references and ranges. Examples:
+
+- `"JHN.1.1"`
+- `"John 1:1"`
+- `"John 1:1-5"`
+
+Ranges are expanded server-side into individual verse IDs before persistence.
 
 ### Update note request
 
