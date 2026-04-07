@@ -61,6 +61,40 @@ Current auth is API-key based and intentionally simple so it can be upgraded to 
 
 - `GET /api/v1/auth/me`
 
+### Invite-code login
+
+For testing and onboarding, the backend supports one-time invite codes.
+
+#### Admin-only code creation
+
+- `POST /api/v1/admin/invites`
+
+This endpoint is protected and only works when the authenticated user matches `SCHOLIA_ADMIN_SUBJECT` or `SCHOLIA_ADMIN_USER_ID`.
+
+Example admin env vars:
+
+```bash
+export SCHOLIA_ADMIN_SUBJECT="dev"
+# or
+export SCHOLIA_ADMIN_USER_ID="usr_xxx"
+```
+
+Security note: set one (or both) in deployment. If neither is set, admin-only routes return 503 (`Admin access not configured`).
+
+#### Code exchange
+
+- `POST /api/v1/auth/exchange-code`
+
+Request body:
+
+```json
+{
+  "code": "ABCD-EFGH-IJKL-MNOP"
+}
+```
+
+On success, the server creates a private user and API key, then returns the API key once. The code cannot be reused.
+
 Unauthenticated response:
 
 ```json
@@ -92,13 +126,18 @@ Authenticated response example:
 
 ### Protected routes
 
-Currently, write operations for notes require `write` scope:
+Notes now require authentication for both read and write operations.
+
+Read operations require `read` scope:
+
+- `GET /api/v1/notes`
+- `GET /api/v1/notes/{note_id}`
+
+Write operations require `write` scope:
 
 - `POST /api/v1/notes`
 - `PUT /api/v1/notes/{note_id}`
 - `DELETE /api/v1/notes/{note_id}`
-
-Read routes remain public.
 
 ## 4. CORS for Local Testing
 
@@ -217,11 +256,13 @@ This route now returns the lexicon entry plus an `occurrences` array from verse 
 
 ### Notes
 
-- `GET /notes?limit=...&offset=...`
-- `GET /notes/{note_id}`
+- Notes are user-owned. Authenticated users only see their own notes.
+- `GET /notes?limit=...&offset=...` (auth required)
+- `GET /notes/{note_id}` (auth required)
 - `POST /notes` (auth required)
 - `PUT /notes/{note_id}` (auth required)
 - `DELETE /notes/{note_id}` (auth required)
+- Notes shown inside `/verse/{osis_id}/context` are also filtered to the authenticated user.
 
 ## 8. Response Structures
 
@@ -593,7 +634,20 @@ async function apiFetch<T>(
 
 ## 11. Local Dev Auth Defaults
 
-If no auth env vars are configured, bootstrap creates a dev API key:
+By default, bootstrap now requires explicit auth configuration.
+
+Set one of these:
+
+- `SCHOLIA_AUTH_KEYS`
+- `SCHOLIA_AUTH_TOKEN`
+
+For local-only development, you can opt in to a generated dev key:
+
+```bash
+export SCHOLIA_ALLOW_DEV_KEY=true
+```
+
+When enabled, bootstrap creates:
 
 - token: `scholia-dev`
 
@@ -601,7 +655,8 @@ Recommended for real environments:
 
 1. Set `SCHOLIA_AUTH_KEYS` with explicit keys and scopes.
 2. Store keys in secrets manager, not in frontend code.
-3. Prefer a backend proxy for privileged operations.
+3. Set `SCHOLIA_ADMIN_USER_ID` (or `SCHOLIA_ADMIN_SUBJECT`) for admin-only invite minting.
+4. Prefer a backend proxy for privileged operations.
 
 ## 12. Quick Test Commands
 
@@ -620,4 +675,100 @@ curl -s -X POST "http://localhost:8080/api/v1/notes" \
   -H "X-API-Key: scholia-dev" \
   -H "Content-Type: application/json" \
   -d '{"title":"Demo","main_reference":"GEN.1.1","content":"...","verse_ids":["GEN.1.1"]}' | jq .
+
+# Admin mint invite (only if SCHOLIA_ADMIN_SUBJECT or SCHOLIA_ADMIN_USER_ID matches)
+curl -s -X POST "http://localhost:8080/api/v1/admin/invites" \
+  -H "X-API-Key: scholia-dev" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"tester-one","scopes":["read","write"]}' | jq .
+
+# Exchange invite code for a private API key
+curl -s -X POST "http://localhost:8080/api/v1/auth/exchange-code" \
+  -H "Content-Type: application/json" \
+  -d '{"code":"ABCD-EFGH-IJKL-MNOP"}' | jq .
 ```
+
+## 13. Frontend Change Log and Migration Notes
+
+This section summarizes all frontend-relevant changes introduced in the recent backend updates.
+
+### What changed
+
+1. Unified API envelope is now standard everywhere
+
+- Frontend should always parse responses as `{ success, data, error, meta }`.
+- Error handling should read `error.message` instead of relying only on HTTP status.
+
+2. Verse IDs and slugs are normalized at request boundaries
+
+- Inputs like `gen.1.1` and `GEN.1.1` resolve consistently.
+- Human-readable references like `John 1:1` are accepted by verse endpoints.
+
+3. Verse range support was added across core verse surfaces
+
+- The following now accept single verse or range:
+  - `GET /api/v1/verse/{osis_id}`
+  - `GET /api/v1/verse/{osis_id}/context`
+  - `GET /api/v1/verse/{osis_id}/cross-references`
+  - `GET /api/v1/analysis/{osis_id}`
+- Range examples include `John 1:1-5`.
+
+4. Backward compatibility fields were preserved for range responses
+
+- Context and analysis range payloads still include legacy `verse` and flattened `analysis`.
+- Cross-reference range payloads include legacy `verse_id`.
+- Existing single-verse UI code should keep working while range-capable UI is added.
+
+5. Notes became user-private and auth-scoped
+
+- Notes are no longer globally shared.
+- Authenticated users only see their own notes.
+- Notes inside verse context are filtered by the current authenticated user.
+
+6. Notes read routes are no longer public
+
+- `GET /notes` and `GET /notes/{note_id}` now require auth with `read` scope.
+- Existing frontend flows that loaded notes anonymously must now attach an API key.
+
+7. Range references in note payloads are now supported
+
+- `verse_ids` can include single references or ranges.
+- Ranges are expanded server-side into individual verse IDs before save.
+
+8. Invite-code onboarding was introduced
+
+- New tester flow:
+  - Admin mints one-time code: `POST /api/v1/admin/invites`
+  - User exchanges code for API key: `POST /api/v1/auth/exchange-code`
+- Codes are single-use and cannot be redeemed twice.
+
+9. Admin gate for invite minting is env-driven
+
+- Invite minting only works for authenticated principal matching:
+  - `SCHOLIA_ADMIN_SUBJECT`, or
+  - `SCHOLIA_ADMIN_USER_ID`
+- Frontend should treat invite creation as a privileged admin action.
+
+10. Lexicon endpoint now includes usage occurrences
+
+- `GET /api/v1/lexicon/{strongs_id}` returns entry data plus `occurrences` from verse analysis.
+- Frontend can render dictionary meaning and contextual usage from one request.
+
+### Frontend migration checklist
+
+1. Ensure all API calls parse the shared envelope and show `error.message` on failure.
+2. Update note list/detail/create/update/delete calls to always send API key auth.
+3. Add auth bootstrap on app load using `GET /api/v1/auth/me`.
+4. Add invite-code login screen that posts to `POST /api/v1/auth/exchange-code`.
+5. Store returned API key securely in client storage strategy used by your app.
+6. Update verse, context, cross-reference, and analysis screens to handle range payloads.
+7. Keep existing single-verse rendering path, but branch to range rendering when `verses` exists.
+8. Update note editor to allow range references in `verse_ids`.
+9. If admin UI exists, gate invite creation UI behind admin-authenticated state.
+
+### Recommended frontend response handling pattern for verse endpoints
+
+1. Detect range payload by checking `data.verses` and `data.start` plus `data.end`.
+2. If absent, fall back to legacy single-verse fields.
+3. For analysis/context range responses, prefer `analysis_by_verse` for grouped rendering.
+4. Use legacy flattened `analysis` only for backward-compatible components.

@@ -55,6 +55,11 @@ func SeedBootstrapAuth(db *sql.DB) error {
 		}
 	}
 	if len(configured) == 0 {
+		allowDevKey := strings.EqualFold(strings.TrimSpace(os.Getenv("SCHOLIA_ALLOW_DEV_KEY")), "1") ||
+			strings.EqualFold(strings.TrimSpace(os.Getenv("SCHOLIA_ALLOW_DEV_KEY")), "true")
+		if !allowDevKey {
+			return fmt.Errorf("no auth keys configured: set SCHOLIA_AUTH_KEYS or SCHOLIA_AUTH_TOKEN (or set SCHOLIA_ALLOW_DEV_KEY=true for local development)")
+		}
 		configured = []seedKey{{Label: "dev", Token: "scholia-dev", Scopes: []string{"read", "write"}}}
 	}
 

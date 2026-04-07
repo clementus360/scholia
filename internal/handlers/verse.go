@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/clementus360/scholia/internal/auth"
 	httputil "github.com/clementus360/scholia/internal/http"
 	"github.com/clementus360/scholia/internal/storage"
 	"github.com/go-chi/chi/v5"
@@ -102,6 +103,8 @@ type VerseRangeAnalysisResponse struct {
 // GetVerseContext handles GET /api/v1/verse/{osis_id}/context
 func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 	reference := chi.URLParam(r, "osis_id")
+	principal, _ := auth.PrincipalFromContext(r.Context())
+	ownerID := principal.UserID
 	pagination, err := httputil.ParsePagination(r, 100, 500)
 	if err != nil {
 		httputil.Error(w, "Invalid pagination parameters", http.StatusBadRequest)
@@ -166,7 +169,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		notes, err := storage.GetNotesByVerseID(h.db, osisID, pagination.Limit, pagination.Offset)
+		notes, err := storage.GetNotesByVerseID(h.db, ownerID, osisID, pagination.Limit, pagination.Offset)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (notes): %v", err), http.StatusInternalServerError)
 			return
@@ -280,7 +283,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			crossReferences = append(crossReferences, ref)
 		}
 
-		noteItems, err := storage.GetNotesByVerseID(h.db, verse.ID, 1000, 0)
+		noteItems, err := storage.GetNotesByVerseID(h.db, ownerID, verse.ID, 1000, 0)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (notes): %v", err), http.StatusInternalServerError)
 			return

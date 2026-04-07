@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/clementus360/scholia/internal/auth"
 	httputil "github.com/clementus360/scholia/internal/http"
 	"github.com/clementus360/scholia/internal/storage"
 	"github.com/go-chi/chi/v5"
@@ -28,13 +29,19 @@ type noteInput struct {
 }
 
 func (h *NotesHandler) ListNotes(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFromContext(r.Context())
+	if !ok || principal.UserID == "" {
+		httputil.Error(w, "Missing or invalid API key", http.StatusUnauthorized)
+		return
+	}
+
 	pagination, err := httputil.ParsePagination(r, 50, 500)
 	if err != nil {
 		httputil.Error(w, "Invalid pagination parameters", http.StatusBadRequest)
 		return
 	}
 
-	notes, err := storage.ListNotes(h.db, pagination.Limit, pagination.Offset)
+	notes, err := storage.ListNotes(h.db, principal.UserID, pagination.Limit, pagination.Offset)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -43,13 +50,19 @@ func (h *NotesHandler) ListNotes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *NotesHandler) GetNote(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFromContext(r.Context())
+	if !ok || principal.UserID == "" {
+		httputil.Error(w, "Missing or invalid API key", http.StatusUnauthorized)
+		return
+	}
+
 	noteID, err := strconv.ParseInt(chi.URLParam(r, "note_id"), 10, 64)
 	if err != nil {
 		httputil.Error(w, "Invalid note ID", http.StatusBadRequest)
 		return
 	}
 
-	note, err := storage.GetNoteByID(h.db, noteID)
+	note, err := storage.GetNoteByID(h.db, principal.UserID, noteID)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -62,6 +75,12 @@ func (h *NotesHandler) GetNote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *NotesHandler) CreateNote(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFromContext(r.Context())
+	if !ok || principal.UserID == "" {
+		httputil.Error(w, "Missing or invalid API key", http.StatusUnauthorized)
+		return
+	}
+
 	var input noteInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		httputil.Error(w, "Invalid JSON body", http.StatusBadRequest)
@@ -79,6 +98,7 @@ func (h *NotesHandler) CreateNote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	note := &storage.Note{
+		OwnerUserID:   principal.UserID,
 		Title:         input.Title,
 		MainReference: input.MainReference,
 		Content:       input.Content,
@@ -91,7 +111,7 @@ func (h *NotesHandler) CreateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := storage.GetNoteByID(h.db, noteID)
+	created, err := storage.GetNoteByID(h.db, principal.UserID, noteID)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -100,6 +120,12 @@ func (h *NotesHandler) CreateNote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *NotesHandler) UpdateNote(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFromContext(r.Context())
+	if !ok || principal.UserID == "" {
+		httputil.Error(w, "Missing or invalid API key", http.StatusUnauthorized)
+		return
+	}
+
 	noteID, err := strconv.ParseInt(chi.URLParam(r, "note_id"), 10, 64)
 	if err != nil {
 		httputil.Error(w, "Invalid note ID", http.StatusBadRequest)
@@ -122,8 +148,9 @@ func (h *NotesHandler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = storage.UpdateNote(h.db, &storage.Note{
+	err = storage.UpdateNote(h.db, principal.UserID, &storage.Note{
 		ID:            noteID,
+		OwnerUserID:   principal.UserID,
 		Title:         input.Title,
 		MainReference: input.MainReference,
 		Content:       input.Content,
@@ -138,7 +165,7 @@ func (h *NotesHandler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	note, err := storage.GetNoteByID(h.db, noteID)
+	note, err := storage.GetNoteByID(h.db, principal.UserID, noteID)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -147,13 +174,19 @@ func (h *NotesHandler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *NotesHandler) DeleteNote(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.PrincipalFromContext(r.Context())
+	if !ok || principal.UserID == "" {
+		httputil.Error(w, "Missing or invalid API key", http.StatusUnauthorized)
+		return
+	}
+
 	noteID, err := strconv.ParseInt(chi.URLParam(r, "note_id"), 10, 64)
 	if err != nil {
 		httputil.Error(w, "Invalid note ID", http.StatusBadRequest)
 		return
 	}
 
-	err = storage.DeleteNote(h.db, noteID)
+	err = storage.DeleteNote(h.db, principal.UserID, noteID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			httputil.Error(w, "Note not found", http.StatusNotFound)

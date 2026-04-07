@@ -109,6 +109,7 @@ type Event struct {
 
 type Note struct {
 	ID            int64    `json:"id"`
+	OwnerUserID   string   `json:"-"`
 	Title         string   `json:"title"`
 	MainReference string   `json:"main_reference"`
 	Content       string   `json:"content"`
@@ -654,13 +655,16 @@ func GetCrossReferencesByVerseID(db *sql.DB, verseID string, limit, offset int) 
 	return refs, nil
 }
 
-func GetNotesByVerseID(db *sql.DB, verseID string, limit, offset int) ([]Note, error) {
+func GetNotesByVerseID(db *sql.DB, ownerID, verseID string, limit, offset int) ([]Note, error) {
+	if strings.TrimSpace(ownerID) == "" {
+		return []Note{}, nil
+	}
 	rows, err := db.Query(`
-		SELECT n.id, n.title, n.main_reference, n.content, n.created_at, n.updated_at
+		SELECT n.id, n.owner_user_id, n.title, n.main_reference, n.content, n.created_at, n.updated_at
 		FROM notes n
 		INNER JOIN note_verses nv ON nv.note_id = n.id
-		WHERE nv.verse_id = ?
-		ORDER BY n.updated_at DESC, n.id DESC LIMIT ? OFFSET ?`, verseID, limit, offset)
+		WHERE nv.verse_id = ? AND n.owner_user_id = ?
+		ORDER BY n.updated_at DESC, n.id DESC LIMIT ? OFFSET ?`, verseID, ownerID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -669,7 +673,7 @@ func GetNotesByVerseID(db *sql.DB, verseID string, limit, offset int) ([]Note, e
 	notes := make([]Note, 0)
 	for rows.Next() {
 		var note Note
-		if err := rows.Scan(&note.ID, &note.Title, &note.MainReference, &note.Content, &note.CreatedAt, &note.UpdatedAt); err != nil {
+		if err := rows.Scan(&note.ID, &note.OwnerUserID, &note.Title, &note.MainReference, &note.Content, &note.CreatedAt, &note.UpdatedAt); err != nil {
 			return nil, err
 		}
 		notes = append(notes, note)
@@ -680,8 +684,11 @@ func GetNotesByVerseID(db *sql.DB, verseID string, limit, offset int) ([]Note, e
 	return notes, nil
 }
 
-func ListNotes(db *sql.DB, limit, offset int) ([]Note, error) {
-	rows, err := db.Query(`SELECT id, title, main_reference, content, created_at, updated_at FROM notes ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
+func ListNotes(db *sql.DB, ownerID string, limit, offset int) ([]Note, error) {
+	if strings.TrimSpace(ownerID) == "" {
+		return []Note{}, nil
+	}
+	rows, err := db.Query(`SELECT id, owner_user_id, title, main_reference, content, created_at, updated_at FROM notes WHERE owner_user_id = ? ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`, ownerID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -690,7 +697,7 @@ func ListNotes(db *sql.DB, limit, offset int) ([]Note, error) {
 	notes := make([]Note, 0)
 	for rows.Next() {
 		var note Note
-		if err := rows.Scan(&note.ID, &note.Title, &note.MainReference, &note.Content, &note.CreatedAt, &note.UpdatedAt); err != nil {
+		if err := rows.Scan(&note.ID, &note.OwnerUserID, &note.Title, &note.MainReference, &note.Content, &note.CreatedAt, &note.UpdatedAt); err != nil {
 			return nil, err
 		}
 		notes = append(notes, note)
@@ -701,10 +708,13 @@ func ListNotes(db *sql.DB, limit, offset int) ([]Note, error) {
 	return notes, nil
 }
 
-func GetNoteByID(db *sql.DB, noteID int64) (*Note, error) {
+func GetNoteByID(db *sql.DB, ownerID string, noteID int64) (*Note, error) {
+	if strings.TrimSpace(ownerID) == "" {
+		return nil, nil
+	}
 	note := &Note{}
-	err := db.QueryRow(`SELECT id, title, main_reference, content, created_at, updated_at FROM notes WHERE id = ?`, noteID).Scan(
-		&note.ID, &note.Title, &note.MainReference, &note.Content, &note.CreatedAt, &note.UpdatedAt)
+	err := db.QueryRow(`SELECT id, owner_user_id, title, main_reference, content, created_at, updated_at FROM notes WHERE id = ? AND owner_user_id = ?`, noteID, ownerID).Scan(
+		&note.ID, &note.OwnerUserID, &note.Title, &note.MainReference, &note.Content, &note.CreatedAt, &note.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -727,7 +737,7 @@ func CreateNote(db *sql.DB, note *Note) (int64, error) {
 	}
 	defer tx.Rollback()
 
-	result, err := tx.Exec(`INSERT INTO notes (title, main_reference, content) VALUES (?, ?, ?)`, note.Title, note.MainReference, note.Content)
+	result, err := tx.Exec(`INSERT INTO notes (owner_user_id, title, main_reference, content) VALUES (?, ?, ?, ?)`, note.OwnerUserID, note.Title, note.MainReference, note.Content)
 	if err != nil {
 		return 0, err
 	}
@@ -744,15 +754,15 @@ func CreateNote(db *sql.DB, note *Note) (int64, error) {
 	return noteID, nil
 }
 
-func UpdateNote(db *sql.DB, note *Note) error {
+func UpdateNote(db *sql.DB, ownerID string, note *Note) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	result, err := tx.Exec(`UPDATE notes SET title = ?, main_reference = ?, content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		note.Title, note.MainReference, note.Content, note.ID)
+	result, err := tx.Exec(`UPDATE notes SET title = ?, main_reference = ?, content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_user_id = ?`,
+		note.Title, note.MainReference, note.Content, note.ID, ownerID)
 	if err != nil {
 		return err
 	}
@@ -769,7 +779,10 @@ func UpdateNote(db *sql.DB, note *Note) error {
 	return tx.Commit()
 }
 
-func DeleteNote(db *sql.DB, noteID int64) error {
+func DeleteNote(db *sql.DB, ownerID string, noteID int64) error {
+	if strings.TrimSpace(ownerID) == "" {
+		return sql.ErrNoRows
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -779,7 +792,7 @@ func DeleteNote(db *sql.DB, noteID int64) error {
 	if _, err := tx.Exec("DELETE FROM note_verses WHERE note_id = ?", noteID); err != nil {
 		return err
 	}
-	result, err := tx.Exec("DELETE FROM notes WHERE id = ?", noteID)
+	result, err := tx.Exec("DELETE FROM notes WHERE id = ? AND owner_user_id = ?", noteID, ownerID)
 	if err != nil {
 		return err
 	}

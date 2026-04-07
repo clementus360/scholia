@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/ncruces/go-sqlite3-wasm v1.0.3-0.20260328094950-9a3c1e23fa90 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect

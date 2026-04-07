@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS versification (
     -- 8. User Data: Enhanced Notes
     CREATE TABLE IF NOT EXISTS notes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_user_id TEXT,
         title TEXT,
         main_reference TEXT,
         content TEXT,
@@ -264,10 +265,85 @@ CREATE TABLE IF NOT EXISTS api_keys (
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_token_hash ON api_keys(token_hash);
 CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
+
+CREATE TABLE IF NOT EXISTS invite_codes (
+    id TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    scopes TEXT NOT NULL DEFAULT 'read',
+    created_by_user_id TEXT NOT NULL,
+    consumed_by_user_id TEXT,
+    consumed_api_key_id TEXT,
+    consumed_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(created_by_user_id) REFERENCES users(id),
+    FOREIGN KEY(consumed_by_user_id) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_invite_codes_code_hash ON invite_codes(code_hash);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_created_by_user_id ON invite_codes(created_by_user_id);
     `
 
 	_, err := db.Exec(schema)
 	if err != nil {
 		log.Fatalf("Failed to create tables: %v", err)
+	}
+
+	ensureNotesOwnershipSchema(db)
+}
+
+func ensureNotesOwnershipSchema(db *sql.DB) {
+	var columnExists bool
+	rows, err := db.Query("PRAGMA table_info(notes)")
+	if err != nil {
+		log.Printf("Failed to inspect notes table: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			log.Printf("Failed to scan notes schema: %v", err)
+			return
+		}
+		if name == "owner_user_id" {
+			columnExists = true
+		}
+	}
+
+	if !columnExists {
+		if _, err := db.Exec("ALTER TABLE notes ADD COLUMN owner_user_id TEXT"); err != nil {
+			log.Printf("Failed to add owner_user_id to notes: %v", err)
+			return
+		}
+	}
+
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_notes_owner_user_id ON notes(owner_user_id)"); err != nil {
+		log.Printf("Failed to create notes owner index: %v", err)
+		return
+	}
+
+	var ownerCount int
+	if err := db.QueryRow("SELECT COUNT(1) FROM notes WHERE owner_user_id IS NOT NULL AND owner_user_id <> ''").Scan(&ownerCount); err != nil {
+		log.Printf("Failed to inspect existing note ownership: %v", err)
+		return
+	}
+	if ownerCount > 0 {
+		return
+	}
+
+	var defaultOwner string
+	if err := db.QueryRow("SELECT id FROM users ORDER BY created_at ASC LIMIT 1").Scan(&defaultOwner); err != nil {
+		log.Printf("No default note owner available for backfill: %v", err)
+		return
+	}
+
+	if _, err := db.Exec("UPDATE notes SET owner_user_id = ? WHERE owner_user_id IS NULL OR owner_user_id = ''", defaultOwner); err != nil {
+		log.Printf("Failed to backfill note ownership: %v", err)
 	}
 }

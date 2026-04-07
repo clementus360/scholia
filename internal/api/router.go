@@ -31,7 +31,8 @@ func NewRouter(db *sql.DB, authManager *auth.Manager) chi.Router {
 	discoveryHandler := handlers.NewDiscoveryHandler(db)
 	navigationHandler := handlers.NewNavigationHandler(db)
 	resolveHandler := handlers.NewResolveHandler(db)
-	authHandler := handlers.NewAuthHandler()
+	authHandler := handlers.NewAuthHandler(db)
+	adminHandler := handlers.NewAdminHandler(db)
 
 	// API routes
 	r.Route("/api/v1", func(r chi.Router) {
@@ -68,15 +69,23 @@ func NewRouter(db *sql.DB, authManager *auth.Manager) chi.Router {
 		// Resolver endpoint
 		r.Get("/resolve/{rec_id}", resolveHandler.ResolveRecID)
 		r.Get("/auth/me", authHandler.Me)
+		r.Post("/auth/exchange-code", authHandler.ExchangeCode)
 
 		// Notes endpoints
-		r.Get("/notes", notesHandler.ListNotes)
-		r.Get("/notes/{note_id}", notesHandler.GetNote)
+		r.Group(func(r chi.Router) {
+			r.Use(authManager.RequireScopes("read"))
+			r.Get("/notes", notesHandler.ListNotes)
+			r.Get("/notes/{note_id}", notesHandler.GetNote)
+		})
 		r.Group(func(r chi.Router) {
 			r.Use(authManager.RequireScopes("write"))
 			r.Post("/notes", notesHandler.CreateNote)
 			r.Put("/notes/{note_id}", notesHandler.UpdateNote)
 			r.Delete("/notes/{note_id}", notesHandler.DeleteNote)
+		})
+		r.Group(func(r chi.Router) {
+			r.Use(authManager.RequireAdmin())
+			r.Post("/admin/invites", adminHandler.CreateInvite)
 		})
 	})
 
