@@ -162,6 +162,14 @@ func GetVerseByID(db *sql.DB, osisID string) (*Verse, error) {
 }
 
 func GetVerseAnalysisByVerseID(db *sql.DB, verseID string) ([]VerseAnalysisToken, error) {
+	resolvedVerseID, err := resolveVerseAnalysisVerseID(db, verseID)
+	if err != nil {
+		return nil, err
+	}
+	if resolvedVerseID == "" {
+		return []VerseAnalysisToken{}, nil
+	}
+
 	rows, err := db.Query(`
 		SELECT
 			va.word_order,
@@ -181,7 +189,7 @@ func GetVerseAnalysisByVerseID(db *sql.DB, verseID string) ([]VerseAnalysisToken
 		LEFT JOIN lexicon l ON l.strongs_id = va.strongs_id
 		LEFT JOIN morphology m ON m.code = va.morph_code
 		WHERE va.verse_id = ?
-		ORDER BY va.word_order ASC`, verseID)
+		ORDER BY va.word_order ASC`, resolvedVerseID)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +241,88 @@ func GetVerseAnalysisByVerseID(db *sql.DB, verseID string) ([]VerseAnalysisToken
 	}
 
 	return tokens, nil
+}
+
+func resolveVerseAnalysisVerseID(db *sql.DB, rawVerseID string) (string, error) {
+	candidates := verseAnalysisCandidates(rawVerseID)
+	if len(candidates) == 0 {
+		return "", nil
+	}
+
+	for _, candidate := range candidates {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(1) FROM verse_analysis WHERE verse_id = ?", candidate).Scan(&count); err != nil {
+			return "", err
+		}
+		if count > 0 {
+			return candidate, nil
+		}
+	}
+
+	for _, candidate := range candidates {
+		if strings.Contains(candidate, "(") {
+			continue
+		}
+		var matched string
+		err := db.QueryRow("SELECT verse_id FROM verse_analysis WHERE verse_id LIKE ? LIMIT 1", candidate+"(%").Scan(&matched)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		matched = strings.TrimSpace(matched)
+		if matched != "" {
+			return matched, nil
+		}
+	}
+
+	return "", nil
+}
+
+func verseAnalysisCandidates(raw string) []string {
+	raw = strings.ToUpper(strings.TrimSpace(raw))
+	if raw == "" {
+		return nil
+	}
+
+	candidates := make([]string, 0, 4)
+	seen := map[string]struct{}{}
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		candidates = append(candidates, v)
+	}
+
+	add(raw)
+
+	open := strings.Index(raw, "(")
+	close := strings.LastIndex(raw, ")")
+	if open > 0 && close > open {
+		base := strings.TrimSpace(raw[:open])
+		inside := strings.TrimSpace(raw[open+1 : close])
+		add(base)
+
+		if inside != "" {
+			add(inside)
+			if strings.Count(inside, ".") == 1 {
+				if dot := strings.Index(base, "."); dot > 0 {
+					book := strings.TrimSpace(base[:dot])
+					if book != "" {
+						add(book + "." + inside)
+					}
+				}
+			}
+		}
+	}
+
+	return candidates
 }
 
 func GetLexiconByID(db *sql.DB, strongsID string) (*LexiconEntry, error) {

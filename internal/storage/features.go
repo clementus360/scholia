@@ -934,6 +934,22 @@ func resolveBookName(token string) string {
 		return ""
 	}
 
+	compact := strings.ReplaceAll(token, " ", "")
+	alias := map[string]string{
+		"PSALM":         "PSA",
+		"PSALMS":        "PSA",
+		"SONGOFSOLOMON": "SNG",
+		"SONGOFSONGS":   "SNG",
+	}
+	if mapped, ok := alias[compact]; ok {
+		if fullName, ok := verseBookNames[mapped]; ok {
+			return fullName
+		}
+		if name, ok := bsbCodeToTheoBook[mapped]; ok {
+			return name
+		}
+	}
+
 	if name, ok := bsbCodeToTheoBook[token]; ok {
 		if fullName, ok := verseBookNames[token]; ok {
 			return fullName
@@ -945,7 +961,19 @@ func resolveBookName(token string) string {
 	for code, name := range bsbCodeToTheoBook {
 		reverse[strings.ToUpper(name)] = code
 	}
+	for code, full := range verseBookNames {
+		reverse[strings.ToUpper(full)] = code
+		reverse[strings.ReplaceAll(strings.ToUpper(full), " ", "")] = code
+	}
 	if code, ok := reverse[token]; ok {
+		if fullName, ok := verseBookNames[code]; ok {
+			return fullName
+		}
+		if name, ok := bsbCodeToTheoBook[code]; ok {
+			return name
+		}
+	}
+	if code, ok := reverse[compact]; ok {
 		if fullName, ok := verseBookNames[code]; ok {
 			return fullName
 		}
