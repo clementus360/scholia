@@ -3,6 +3,8 @@ package storage
 import (
 	"database/sql"
 	"log"
+	"os"
+	"path/filepath"
 
 	// CGO-free driver and embedded SQLite for macOS/ARM64 compatibility
 	_ "github.com/ncruces/go-sqlite3/driver"
@@ -15,6 +17,46 @@ type Verse struct {
 	Chapter     int    `json:"chapter"`
 	Verse       int    `json:"verse"`
 	Text        string `json:"text"`
+}
+
+// ResolveDBPath returns a stable database path across different working directories.
+// Priority: SCHOLIA_DB_PATH -> existing cwd-relative path -> nearest ancestor path -> defaultPath.
+func ResolveDBPath(defaultPath string) string {
+	if override := os.Getenv("SCHOLIA_DB_PATH"); override != "" {
+		if abs, err := filepath.Abs(override); err == nil {
+			return abs
+		}
+		return override
+	}
+
+	if filepath.IsAbs(defaultPath) {
+		return defaultPath
+	}
+
+	if _, err := os.Stat(defaultPath); err == nil {
+		return defaultPath
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return defaultPath
+	}
+
+	probeDir := cwd
+	for {
+		candidate := filepath.Join(probeDir, defaultPath)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+
+		parent := filepath.Dir(probeDir)
+		if parent == probeDir {
+			break
+		}
+		probeDir = parent
+	}
+
+	return defaultPath
 }
 
 func InitDB(filepath string) *sql.DB {

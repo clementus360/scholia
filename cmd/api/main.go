@@ -24,8 +24,10 @@ func main() {
 		}
 	}
 
-	// Initialize the DB
-	db := storage.InitDB("./data/bible.db")
+	// Initialize the DB using a stable path (or SCHOLIA_DB_PATH override)
+	dbPath := storage.ResolveDBPath("./data/bible.db")
+	log.Printf("Using database: %s", dbPath)
+	db := storage.InitDB(dbPath)
 	defer db.Close()
 
 	// Ensure tables exist

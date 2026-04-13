@@ -226,7 +226,9 @@ func SanitizeLexicon(input string) string {
 // --- SEEDERS ---
 
 func main() {
-	db := storage.InitDB("./data/bible.db")
+	dbPath := storage.ResolveDBPath("./data/bible.db")
+	log.Printf("Using database: %s", dbPath)
+	db := storage.InitDB(dbPath)
 	defer db.Close()
 
 	// Ensure constraints are managed during high-volume inserts
