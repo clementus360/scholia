@@ -122,10 +122,15 @@ func getYear(fields map[string]interface{}, key string) (int, bool) {
 // --- UTILS ---
 
 func getBookCode(name string) string {
+	normalized := normalizeBookName(name)
 	bookMap := map[string]string{
 		"Genesis": "GEN", "Exodus": "EXO", "Leviticus": "LEV", "Numbers": "NUM", "Deuteronomy": "DEU",
 		"Joshua": "JOS", "Judges": "JDG", "Ruth": "RUT", "1 Samuel": "1SA", "2 Samuel": "2SA",
 		"1 Kings": "1KI", "2 Kings": "2KI", "1 Chronicles": "1CH", "2 Chronicles": "2CH",
+		"I Samuel": "1SA", "II Samuel": "2SA", "I Kings": "1KI", "II Kings": "2KI",
+		"I Chronicles": "1CH", "II Chronicles": "2CH", "I Corinthians": "1CO", "II Corinthians": "2CO",
+		"I Thessalonians": "1TH", "II Thessalonians": "2TH", "I Timothy": "1TI", "II Timothy": "2TI",
+		"I Peter": "1PE", "II Peter": "2PE", "I John": "1JO", "II John": "2JO",
 		"Ezra": "EZR", "Nehemiah": "NEH", "Esther": "EST", "Job": "JOB", "Psalms": "PSA",
 		"Proverbs": "PRO", "Ecclesiastes": "ECC", "Song of Solomon": "SNG", "Isaiah": "ISA",
 		"Jeremiah": "JER", "Lamentations": "LAM", "Ezekiel": "EZK", "Daniel": "DAN",
@@ -139,13 +144,42 @@ func getBookCode(name string) string {
 		"Philemon": "PHM", "Hebrews": "HEB", "James": "JAS", "1 Peter": "1PE", "2 Peter": "2PE",
 		"1 John": "1JO", "2 John": "2JO", "3 John": "3JO", "Jude": "JUD", "Revelation": "REV",
 	}
+	if code, ok := bookMap[normalized]; ok {
+		return code
+	}
 	if code, ok := bookMap[name]; ok {
 		return code
 	}
-	if len(name) >= 3 {
-		return strings.ToUpper(name[:3])
+	if len(normalized) >= 3 {
+		return strings.ToUpper(normalized[:3])
 	}
-	return strings.ToUpper(name)
+	return strings.ToUpper(normalized)
+}
+
+func normalizeBookName(name string) string {
+	normalized := strings.TrimSpace(name)
+	replacements := []struct{ old, new string }{
+		{"I Samuel", "1 Samuel"},
+		{"II Samuel", "2 Samuel"},
+		{"I Kings", "1 Kings"},
+		{"II Kings", "2 Kings"},
+		{"I Chronicles", "1 Chronicles"},
+		{"II Chronicles", "2 Chronicles"},
+		{"I Corinthians", "1 Corinthians"},
+		{"II Corinthians", "2 Corinthians"},
+		{"I Thessalonians", "1 Thessalonians"},
+		{"II Thessalonians", "2 Thessalonians"},
+		{"I Timothy", "1 Timothy"},
+		{"II Timothy", "2 Timothy"},
+		{"I Peter", "1 Peter"},
+		{"II Peter", "2 Peter"},
+		{"I John", "1 John"},
+		{"II John", "2 John"},
+	}
+	for _, replacement := range replacements {
+		normalized = strings.ReplaceAll(normalized, replacement.old, replacement.new)
+	}
+	return normalized
 }
 
 func normalizeStrongs(id string) string {
@@ -200,7 +234,7 @@ func main() {
 
 	storage.CreateTables(db)
 
-	seedBible(db, "./data/bsb.json")
+	seedBible(db, "./data/BSB.json")
 	seedLexiconFolder(db, "./data/lexicons/")
 
 	morphFiles := []string{
@@ -239,11 +273,12 @@ func seedBible(db *sql.DB, path string) {
 	ftsStmt, _ := tx.Prepare(`INSERT INTO verses_fts (osis_id, translation, content) VALUES (?, ?, ?)`)
 
 	for _, book := range data.Books {
-		bookCode := getBookCode(book.Name)
+		bookName := normalizeBookName(book.Name)
+		bookCode := getBookCode(bookName)
 		for _, chap := range book.Chapters {
 			for _, v := range chap.Verses {
 				osisID := fmt.Sprintf("%s.%d.%d", bookCode, chap.Chapter, v.Verse)
-				stmt.Exec(osisID, "BSB", book.Name, chap.Chapter, v.Verse, v.Text)
+				stmt.Exec(osisID, "BSB", bookName, chap.Chapter, v.Verse, v.Text)
 				ftsStmt.Exec(osisID, "BSB", v.Text)
 			}
 		}
