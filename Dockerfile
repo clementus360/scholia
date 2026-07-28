@@ -28,7 +28,15 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/api ./cmd/api
 # path: the running container starts serving immediately instead of spending
 # its first minutes seeding, which on a small instance can exceed a platform's
 # port-detection timeout and fail the deploy.
-RUN go run ./cmd/seed
+#
+# Compiled separately from `go run` so the toolchain's memory is released
+# before seeding starts, and run under a soft memory limit so the Go collector
+# works harder instead of growing the heap. A full seed peaks around 250MB of
+# live data; 512MB leaves headroom without letting it balloon on a constrained
+# builder. Raise GOMEMLIMIT if your builder has plenty of RAM and you would
+# rather have the speed.
+RUN go build -o /out/seed ./cmd/seed \
+    && GOMEMLIMIT=512MiB GOGC=50 /out/seed
 
 # Fail the build rather than shipping a corpus the API will refuse to open.
 # cmd/seed checkpoints and leaves rollback-journal mode; a surviving -wal or
