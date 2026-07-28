@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -13,12 +14,15 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// NotesHandler is the one handler that spans both databases: notes are stored
+// in Postgres, but the verse references attached to them are validated against
+// the read-only Bible corpus.
 type NotesHandler struct {
-	db *sql.DB
+	stores *storage.Stores
 }
 
-func NewNotesHandler(db *sql.DB) *NotesHandler {
-	return &NotesHandler{db: db}
+func NewNotesHandler(stores *storage.Stores) *NotesHandler {
+	return &NotesHandler{stores: stores}
 }
 
 type noteInput struct {
@@ -31,7 +35,7 @@ type noteInput struct {
 func (h *NotesHandler) ListNotes(w http.ResponseWriter, r *http.Request) {
 	principal, ok := auth.PrincipalFromContext(r.Context())
 	if !ok || principal.UserID == "" {
-		httputil.Error(w, "Missing or invalid API key", http.StatusUnauthorized)
+		httputil.Error(w, "Missing or invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
@@ -41,7 +45,7 @@ func (h *NotesHandler) ListNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	notes, err := storage.ListNotes(h.db, principal.UserID, pagination.Limit, pagination.Offset)
+	notes, err := storage.ListNotes(r.Context(), h.stores.Users, principal.UserID, pagination.Limit, pagination.Offset)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -52,7 +56,7 @@ func (h *NotesHandler) ListNotes(w http.ResponseWriter, r *http.Request) {
 func (h *NotesHandler) GetNote(w http.ResponseWriter, r *http.Request) {
 	principal, ok := auth.PrincipalFromContext(r.Context())
 	if !ok || principal.UserID == "" {
-		httputil.Error(w, "Missing or invalid API key", http.StatusUnauthorized)
+		httputil.Error(w, "Missing or invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
@@ -62,7 +66,7 @@ func (h *NotesHandler) GetNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	note, err := storage.GetNoteByID(h.db, principal.UserID, noteID)
+	note, err := storage.GetNoteByID(r.Context(), h.stores.Users, principal.UserID, noteID)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -77,7 +81,7 @@ func (h *NotesHandler) GetNote(w http.ResponseWriter, r *http.Request) {
 func (h *NotesHandler) CreateNote(w http.ResponseWriter, r *http.Request) {
 	principal, ok := auth.PrincipalFromContext(r.Context())
 	if !ok || principal.UserID == "" {
-		httputil.Error(w, "Missing or invalid API key", http.StatusUnauthorized)
+		httputil.Error(w, "Missing or invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
@@ -87,31 +91,24 @@ func (h *NotesHandler) CreateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	verseIDs, unresolved, err := storage.ExpandVerseReferences(h.db, input.VerseIDs)
-	if err != nil {
-		httputil.Error(w, "Database error", http.StatusInternalServerError)
-		return
-	}
-	if len(unresolved) > 0 {
-		httputil.Error(w, fmt.Sprintf("Unresolved verse reference(s): %s", unresolved[0]), http.StatusBadRequest)
+	verseIDs, ok := h.resolveVerseIDs(w, input.VerseIDs)
+	if !ok {
 		return
 	}
 
-	note := &storage.Note{
+	noteID, err := storage.CreateNote(r.Context(), h.stores.Users, &storage.Note{
 		OwnerUserID:   principal.UserID,
 		Title:         input.Title,
 		MainReference: input.MainReference,
 		Content:       input.Content,
 		VerseIDs:      verseIDs,
-	}
-
-	noteID, err := storage.CreateNote(h.db, note)
+	})
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
-	created, err := storage.GetNoteByID(h.db, principal.UserID, noteID)
+	created, err := storage.GetNoteByID(r.Context(), h.stores.Users, principal.UserID, noteID)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -122,7 +119,7 @@ func (h *NotesHandler) CreateNote(w http.ResponseWriter, r *http.Request) {
 func (h *NotesHandler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 	principal, ok := auth.PrincipalFromContext(r.Context())
 	if !ok || principal.UserID == "" {
-		httputil.Error(w, "Missing or invalid API key", http.StatusUnauthorized)
+		httputil.Error(w, "Missing or invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
@@ -138,17 +135,12 @@ func (h *NotesHandler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	verseIDs, unresolved, err := storage.ExpandVerseReferences(h.db, input.VerseIDs)
-	if err != nil {
-		httputil.Error(w, "Database error", http.StatusInternalServerError)
-		return
-	}
-	if len(unresolved) > 0 {
-		httputil.Error(w, fmt.Sprintf("Unresolved verse reference(s): %s", unresolved[0]), http.StatusBadRequest)
+	verseIDs, ok := h.resolveVerseIDs(w, input.VerseIDs)
+	if !ok {
 		return
 	}
 
-	err = storage.UpdateNote(h.db, principal.UserID, &storage.Note{
+	err = storage.UpdateNote(r.Context(), h.stores.Users, principal.UserID, &storage.Note{
 		ID:            noteID,
 		OwnerUserID:   principal.UserID,
 		Title:         input.Title,
@@ -157,7 +149,7 @@ func (h *NotesHandler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 		VerseIDs:      verseIDs,
 	})
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			httputil.Error(w, "Note not found", http.StatusNotFound)
 			return
 		}
@@ -165,7 +157,7 @@ func (h *NotesHandler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	note, err := storage.GetNoteByID(h.db, principal.UserID, noteID)
+	note, err := storage.GetNoteByID(r.Context(), h.stores.Users, principal.UserID, noteID)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -176,7 +168,7 @@ func (h *NotesHandler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 func (h *NotesHandler) DeleteNote(w http.ResponseWriter, r *http.Request) {
 	principal, ok := auth.PrincipalFromContext(r.Context())
 	if !ok || principal.UserID == "" {
-		httputil.Error(w, "Missing or invalid API key", http.StatusUnauthorized)
+		httputil.Error(w, "Missing or invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
@@ -186,9 +178,8 @@ func (h *NotesHandler) DeleteNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = storage.DeleteNote(h.db, principal.UserID, noteID)
-	if err != nil {
-		if err == sql.ErrNoRows {
+	if err := storage.DeleteNote(r.Context(), h.stores.Users, principal.UserID, noteID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
 			httputil.Error(w, "Note not found", http.StatusNotFound)
 			return
 		}
@@ -197,4 +188,27 @@ func (h *NotesHandler) DeleteNote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httputil.Success(w, map[string]any{"deleted": true, "note_id": noteID}, http.StatusOK)
+}
+
+// resolveVerseIDs expands user-supplied references (which may be ranges like
+// "John 3:16-18") into concrete OSIS verse IDs, against the Bible database.
+//
+// This is the substitute for the foreign key that note_verses used to have on
+// verses.id. That constraint disappeared when the two datasets moved into
+// separate databases, so validation has to happen here instead — otherwise a
+// note could reference a verse that does not exist.
+//
+// It writes the error response itself and reports whether the caller should
+// continue.
+func (h *NotesHandler) resolveVerseIDs(w http.ResponseWriter, references []string) ([]string, bool) {
+	verseIDs, unresolved, err := storage.ExpandVerseReferences(h.stores.Bible, references)
+	if err != nil {
+		httputil.Error(w, "Database error", http.StatusInternalServerError)
+		return nil, false
+	}
+	if len(unresolved) > 0 {
+		httputil.Error(w, fmt.Sprintf("Unresolved verse reference(s): %s", unresolved[0]), http.StatusBadRequest)
+		return nil, false
+	}
+	return verseIDs, true
 }

@@ -121,65 +121,132 @@ func getYear(fields map[string]interface{}, key string) (int, bool) {
 
 // --- UTILS ---
 
-func getBookCode(name string) string {
-	normalized := normalizeBookName(name)
-	bookMap := map[string]string{
-		"Genesis": "GEN", "Exodus": "EXO", "Leviticus": "LEV", "Numbers": "NUM", "Deuteronomy": "DEU",
-		"Joshua": "JOS", "Judges": "JDG", "Ruth": "RUT", "1 Samuel": "1SA", "2 Samuel": "2SA",
-		"1 Kings": "1KI", "2 Kings": "2KI", "1 Chronicles": "1CH", "2 Chronicles": "2CH",
-		"I Samuel": "1SA", "II Samuel": "2SA", "I Kings": "1KI", "II Kings": "2KI",
-		"I Chronicles": "1CH", "II Chronicles": "2CH", "I Corinthians": "1CO", "II Corinthians": "2CO",
-		"I Thessalonians": "1TH", "II Thessalonians": "2TH", "I Timothy": "1TI", "II Timothy": "2TI",
-		"I Peter": "1PE", "II Peter": "2PE", "I John": "1JO", "II John": "2JO",
-		"Ezra": "EZR", "Nehemiah": "NEH", "Esther": "EST", "Job": "JOB", "Psalms": "PSA",
-		"Proverbs": "PRO", "Ecclesiastes": "ECC", "Song of Solomon": "SNG", "Isaiah": "ISA",
-		"Jeremiah": "JER", "Lamentations": "LAM", "Ezekiel": "EZK", "Daniel": "DAN",
-		"Hosea": "HOS", "Joel": "JOL", "Amos": "AMO", "Obadiah": "OBA", "Jonah": "JON",
-		"Micah": "MIC", "Nahum": "NAM", "Habakkuk": "HAB", "Zephaniah": "ZEP", "Haggai": "HAG",
-		"Zechariah": "ZEC", "Malachi": "MAL",
-		"Matthew": "MAT", "Mark": "MRK", "Luke": "LUK", "John": "JHN", "Acts": "ACT",
-		"Romans": "ROM", "1 Corinthians": "1CO", "2 Corinthians": "2CO", "Galatians": "GAL",
-		"Ephesians": "EPH", "Philippians": "PHP", "Colossians": "COL", "1 Thessalonians": "1TH",
-		"2 Thessalonians": "2TH", "1 Timothy": "1TI", "2 Timothy": "2TI", "Titus": "TIT",
-		"Philemon": "PHM", "Hebrews": "HEB", "James": "JAS", "1 Peter": "1PE", "2 Peter": "2PE",
-		"1 John": "1JO", "2 John": "2JO", "3 John": "3JO", "Jude": "JUD", "Revelation": "REV",
-	}
-	if code, ok := bookMap[normalized]; ok {
-		return code
-	}
-	if code, ok := bookMap[name]; ok {
-		return code
-	}
-	if len(normalized) >= 3 {
-		return strings.ToUpper(normalized[:3])
-	}
-	return strings.ToUpper(normalized)
+// bookTable is the single source of truth for book identity. Each row lists the
+// canonical STEP code (used as the prefix of verses.id and everywhere else), the
+// canonical display name, and every alias we may encounter across the source
+// files: BSB full names (Arabic + Roman numerals), OSIS codes (cross-refs,
+// geography), and STEP amalgamated codes. Everything routes through here so all
+// tables share ONE verse-id vocabulary.
+var bookTable = []struct {
+	code, name string
+	aliases    []string
+}{
+	{"GEN", "Genesis", []string{"gen"}},
+	{"EXO", "Exodus", []string{"exo", "exod"}},
+	{"LEV", "Leviticus", []string{"lev"}},
+	{"NUM", "Numbers", []string{"num"}},
+	{"DEU", "Deuteronomy", []string{"deu", "deut"}},
+	{"JOS", "Joshua", []string{"jos", "josh"}},
+	{"JDG", "Judges", []string{"jdg", "judg"}},
+	{"RUT", "Ruth", []string{"rut", "ruth"}},
+	{"1SA", "1 Samuel", []string{"1sa", "1sam", "i samuel"}},
+	{"2SA", "2 Samuel", []string{"2sa", "2sam", "ii samuel"}},
+	{"1KI", "1 Kings", []string{"1ki", "1kgs", "i kings"}},
+	{"2KI", "2 Kings", []string{"2ki", "2kgs", "ii kings"}},
+	{"1CH", "1 Chronicles", []string{"1ch", "1chr", "i chronicles"}},
+	{"2CH", "2 Chronicles", []string{"2ch", "2chr", "ii chronicles"}},
+	{"EZR", "Ezra", []string{"ezr", "ezra"}},
+	{"NEH", "Nehemiah", []string{"neh"}},
+	{"EST", "Esther", []string{"est", "esth"}},
+	{"JOB", "Job", []string{"job"}},
+	{"PSA", "Psalms", []string{"psa", "ps", "psalm"}},
+	{"PRO", "Proverbs", []string{"pro", "prov"}},
+	{"ECC", "Ecclesiastes", []string{"ecc", "eccl"}},
+	{"SNG", "Song of Solomon", []string{"sng", "song", "song of songs", "sos"}},
+	{"ISA", "Isaiah", []string{"isa"}},
+	{"JER", "Jeremiah", []string{"jer"}},
+	{"LAM", "Lamentations", []string{"lam"}},
+	{"EZK", "Ezekiel", []string{"ezk", "ezek"}},
+	{"DAN", "Daniel", []string{"dan"}},
+	{"HOS", "Hosea", []string{"hos"}},
+	{"JOL", "Joel", []string{"jol", "joel"}},
+	{"AMO", "Amos", []string{"amo", "amos"}},
+	{"OBA", "Obadiah", []string{"oba", "obad"}},
+	{"JON", "Jonah", []string{"jon", "jonah"}},
+	{"MIC", "Micah", []string{"mic"}},
+	{"NAM", "Nahum", []string{"nam", "nah"}},
+	{"HAB", "Habakkuk", []string{"hab"}},
+	{"ZEP", "Zephaniah", []string{"zep", "zeph"}},
+	{"HAG", "Haggai", []string{"hag"}},
+	{"ZEC", "Zechariah", []string{"zec", "zech"}},
+	{"MAL", "Malachi", []string{"mal"}},
+	{"MAT", "Matthew", []string{"mat", "matt"}},
+	{"MRK", "Mark", []string{"mrk", "mark"}},
+	{"LUK", "Luke", []string{"luk", "luke"}},
+	{"JHN", "John", []string{"jhn", "john"}},
+	{"ACT", "Acts", []string{"act", "acts"}},
+	{"ROM", "Romans", []string{"rom"}},
+	{"1CO", "1 Corinthians", []string{"1co", "1cor", "i corinthians"}},
+	{"2CO", "2 Corinthians", []string{"2co", "2cor", "ii corinthians"}},
+	{"GAL", "Galatians", []string{"gal"}},
+	{"EPH", "Ephesians", []string{"eph"}},
+	{"PHP", "Philippians", []string{"php", "phil", "phi"}},
+	{"COL", "Colossians", []string{"col"}},
+	{"1TH", "1 Thessalonians", []string{"1th", "1thess", "i thessalonians"}},
+	{"2TH", "2 Thessalonians", []string{"2th", "2thess", "ii thessalonians"}},
+	{"1TI", "1 Timothy", []string{"1ti", "1tim", "i timothy"}},
+	{"2TI", "2 Timothy", []string{"2ti", "2tim", "ii timothy"}},
+	{"TIT", "Titus", []string{"tit", "titus"}},
+	{"PHM", "Philemon", []string{"phm", "phlm", "phile"}},
+	{"HEB", "Hebrews", []string{"heb"}},
+	{"JAS", "James", []string{"jas", "jam", "james"}},
+	{"1PE", "1 Peter", []string{"1pe", "1pet", "i peter"}},
+	{"2PE", "2 Peter", []string{"2pe", "2pet", "ii peter"}},
+	{"1JO", "1 John", []string{"1jo", "1jn", "1john", "i john"}},
+	{"2JO", "2 John", []string{"2jo", "2jn", "2john", "ii john"}},
+	{"3JO", "3 John", []string{"3jo", "3jn", "3john", "iii john"}},
+	{"JUD", "Jude", []string{"jud", "jude"}},
+	{"REV", "Revelation", []string{"rev", "revelation of john"}},
 }
 
+var bookAliasToCode = func() map[string]string {
+	m := map[string]string{}
+	for _, b := range bookTable {
+		m[strings.ToLower(b.code)] = b.code
+		m[strings.ToLower(b.name)] = b.code
+		for _, a := range b.aliases {
+			m[a] = b.code
+		}
+	}
+	return m
+}()
+
+var bookCodeToName = func() map[string]string {
+	m := map[string]string{}
+	for _, b := range bookTable {
+		m[b.code] = b.name
+	}
+	return m
+}()
+
+// canonicalBookCode maps any known spelling of a book (full name Arabic/Roman,
+// OSIS code, or STEP code) to the canonical STEP code used in verses.id.
+func canonicalBookCode(token string) string {
+	t := strings.ToLower(strings.TrimSpace(token))
+	t = strings.TrimSuffix(t, ".")
+	t = strings.Join(strings.Fields(t), " ") // collapse internal whitespace
+	if code, ok := bookAliasToCode[t]; ok {
+		return code
+	}
+	up := strings.ToUpper(strings.TrimSpace(token))
+	if len(up) >= 3 {
+		return up[:3]
+	}
+	return up
+}
+
+// canonicalBookName returns the canonical display name for a STEP code.
+func canonicalBookName(code string) string {
+	if n, ok := bookCodeToName[code]; ok {
+		return n
+	}
+	return code
+}
+
+func getBookCode(name string) string { return canonicalBookCode(name) }
+
 func normalizeBookName(name string) string {
-	normalized := strings.TrimSpace(name)
-	replacements := []struct{ old, new string }{
-		{"I Samuel", "1 Samuel"},
-		{"II Samuel", "2 Samuel"},
-		{"I Kings", "1 Kings"},
-		{"II Kings", "2 Kings"},
-		{"I Chronicles", "1 Chronicles"},
-		{"II Chronicles", "2 Chronicles"},
-		{"I Corinthians", "1 Corinthians"},
-		{"II Corinthians", "2 Corinthians"},
-		{"I Thessalonians", "1 Thessalonians"},
-		{"II Thessalonians", "2 Thessalonians"},
-		{"I Timothy", "1 Timothy"},
-		{"II Timothy", "2 Timothy"},
-		{"I Peter", "1 Peter"},
-		{"II Peter", "2 Peter"},
-		{"I John", "1 John"},
-		{"II John", "2 John"},
-	}
-	for _, replacement := range replacements {
-		normalized = strings.ReplaceAll(normalized, replacement.old, replacement.new)
-	}
-	return normalized
+	return canonicalBookName(canonicalBookCode(name))
 }
 
 func normalizeStrongs(id string) string {
@@ -228,13 +295,16 @@ func SanitizeLexicon(input string) string {
 func main() {
 	dbPath := storage.ResolveDBPath("./data/bible.db")
 	log.Printf("Using database: %s", dbPath)
-	db := storage.InitDB(dbPath)
+
+	db, err := storage.OpenBibleDBForSeed(dbPath)
+	if err != nil {
+		log.Fatalf("open bible database: %v", err)
+	}
 	defer db.Close()
 
-	// Ensure constraints are managed during high-volume inserts
-	db.Exec("PRAGMA foreign_keys = ON;")
-
-	storage.CreateTables(db)
+	if err := storage.CreateBibleTables(db); err != nil {
+		log.Fatalf("create tables: %v", err)
+	}
 
 	seedBible(db, "./data/BSB.json")
 	seedLexiconFolder(db, "./data/lexicons/")
@@ -255,7 +325,20 @@ func main() {
 
 	SeedTheographicData(db, "./data/history")
 
+	// After all locations (ancient + theographic) exist and are merged, attach
+	// map-shape geometry from geometry.jsonl by matching on location name.
+	SeedGeometry(db, "./data/geography")
+
 	SeedCrossReferences(db, "./data/crossreference/cross_references.txt")
+
+	// Fold the WAL back in and leave a single self-contained file. The API
+	// opens this database read-only from an immutable image layer, where WAL
+	// mode cannot work: a WAL reader has to write the -shm sidecar even when it
+	// only reads. Skipping this step produces a corpus the API refuses to open.
+	log.Print("Finalizing database for read-only use...")
+	if err := storage.FinalizeBibleDB(db); err != nil {
+		log.Fatalf("finalize database: %v", err)
+	}
 
 	fmt.Println("\n🚀 Full Scholarly Suite Seeded Successfully!")
 }
@@ -275,8 +358,8 @@ func seedBible(db *sql.DB, path string) {
 	ftsStmt, _ := tx.Prepare(`INSERT INTO verses_fts (osis_id, translation, content) VALUES (?, ?, ?)`)
 
 	for _, book := range data.Books {
-		bookName := normalizeBookName(book.Name)
-		bookCode := getBookCode(bookName)
+		bookCode := canonicalBookCode(book.Name)
+		bookName := canonicalBookName(bookCode)
 		for _, chap := range book.Chapters {
 			for _, v := range chap.Verses {
 				osisID := fmt.Sprintf("%s.%d.%d", bookCode, chap.Chapter, v.Verse)
@@ -304,24 +387,29 @@ func seedLexicon(db *sql.DB, path string) {
 	defer file.Close()
 
 	tx, _ := db.Begin()
-	stmt, _ := tx.Prepare(`INSERT OR REPLACE INTO lexicon (strongs_id, word, transliteration, definition) VALUES (?, ?, ?, ?)`)
+	// INSERT OR IGNORE (not REPLACE): a single eStrong number (e.g. G0001) is
+	// shared by several disambiguated senses (G0001G=Alpha the letter,
+	// G0001H=ah! the interjection). REPLACE let the LAST sense win — and let the
+	// later-globbed TFLSJ file clobber every TBESG entry. IGNORE keeps the first
+	// (base) sense and only fills genuinely-missing keys from later files.
+	stmt, _ := tx.Prepare(`INSERT OR IGNORE INTO lexicon (strongs_id, word, transliteration, definition) VALUES (?, ?, ?, ?)`)
 	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
 
-	inData := false
+	// A real data row's first tab-field is a Strong's code like "G0001"/"H0001".
+	// Keying on that (instead of a doc line that merely starts with "eStrong")
+	// skips the intro prose AND the appended names dictionary, whose rows used to
+	// leak in as junk ("- Named", "$========== PERSON(s)").
+	isStrong := regexp.MustCompile(`^[GH][0-9]`)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "eStrong") {
-			inData = true
-			continue
-		}
-		if !inData || strings.HasPrefix(line, "===") || strings.TrimSpace(line) == "" {
-			continue
-		}
 		parts := strings.Split(line, "\t")
-		if len(parts) >= 8 {
-			sID := normalizeStrongs(parts[0])
-			stmt.Exec(sID, parts[3], parts[4], SanitizeLexicon(parts[7]))
+		if len(parts) < 8 || !isStrong.MatchString(strings.TrimSpace(parts[0])) {
+			continue
 		}
+		sID := normalizeStrongs(parts[0])
+		stmt.Exec(sID, parts[3], parts[4], SanitizeLexicon(parts[7]))
 	}
 	tx.Commit()
 	fmt.Printf("✅ Lexicon seeded: %s\n", filepath.Base(path))
@@ -349,13 +437,27 @@ func seedMorphology(db *sql.DB, path string) {
 func seedAmalgamated(db *sql.DB, folderPath string) {
 	files, _ := filepath.Glob(filepath.Join(folderPath, "*.txt"))
 
+	// Load the set of real BSB verse ids (seeded before this step) so we can
+	// attach analysis only to verses that actually exist in the text.
+	realVerseIDs := map[string]struct{}{}
+	if rows, err := db.Query("SELECT id FROM verses"); err == nil {
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				realVerseIDs[id] = struct{}{}
+			}
+		}
+		rows.Close()
+	}
+
 	tx, _ := db.Begin()
 	stmt, _ := tx.Prepare(`
-        INSERT OR REPLACE INTO verse_analysis 
-        (verse_id, word_order, surface_word, english_gloss, strongs_id, morph_code, manuscript_type) 
+        INSERT OR REPLACE INTO verse_analysis
+        (verse_id, word_order, surface_word, english_gloss, strongs_id, morph_code, manuscript_type)
         VALUES (?, ?, ?, ?, ?, ?, ?)`)
 
 	totalWords := 0
+	droppedNoVerse := 0
 	for _, path := range files {
 		fileName := filepath.Base(path)
 		isHebrew := strings.Contains(fileName, "TAHOT")
@@ -376,14 +478,23 @@ func seedAmalgamated(db *sql.DB, folderPath string) {
 			}
 
 			parts := strings.Split(line, "\t")
-			if len(parts) < 5 {
+			minCols := 4 // Greek needs parts[0..3]
+			if isHebrew {
+				minCols = 6 // Hebrew reads parts[5]
+			}
+			if len(parts) < minCols {
 				continue
 			}
 
 			// --- Clean Reference ---
+			// normalizeRef canonicalises the book code (1Jn -> 1JO, matching the
+			// BSB verses table) and strips the alternate-versification
+			// parenthetical: "Psa.3.1(3.2)" -> "PSA.3.1" (the outer number is the
+			// English/BSB numbering; the parenthetical is Hebrew). Superscription
+			// tokens like "Psa.3.0" have no BSB verse and are dropped below.
 			rawRef := parts[0]
 			refSplit := strings.Split(rawRef, "#")
-			verseID := strings.ToUpper(strings.TrimSpace(refSplit[0]))
+			verseID := normalizeRef(refSplit[0])
 
 			wordOrder := "0"
 			mType := "L"
@@ -414,26 +525,23 @@ func seedAmalgamated(db *sql.DB, folderPath string) {
 				}
 			}
 
-			// --- Execute with Transaction-level Lazy Seeding ---
-			_, err := stmt.Exec(verseID, wordOrder, surfaceWord, gloss, strongsID, morphCode, mType)
-			if err != nil && strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
-				// Use 'tx.Exec' so the current transaction sees these new records immediately
-				tx.Exec("INSERT OR IGNORE INTO verses (id, text) VALUES (?, ?)", verseID, "[Text pending...]")
-				if strongsID != "" {
-					tx.Exec("INSERT OR IGNORE INTO lexicon (strongs_id, word) VALUES (?, ?)", strongsID, "[Definition pending...]")
-				}
-				// Retry
-				_, err = stmt.Exec(verseID, wordOrder, surfaceWord, gloss, strongsID, morphCode, mType)
+			// verse_analysis no longer carries cross-table FKs, so inserts never
+			// fail on a missing verse/lexicon/morphology row and we no longer
+			// fabricate "[Text pending...]" verses. We only skip tokens whose
+			// verse has no home in the BSB text (e.g. Hebrew Psalm
+			// superscriptions numbered ".0", which BSB does not render).
+			if _, ok := realVerseIDs[verseID]; !ok {
+				droppedNoVerse++
+				continue
 			}
-
-			if err == nil {
+			if _, err := stmt.Exec(verseID, wordOrder, surfaceWord, gloss, strongsID, morphCode, mType); err == nil {
 				totalWords++
 			}
 		}
 		file.Close()
 	}
 	tx.Commit()
-	fmt.Printf("✅ Analysis seeded: %d tokens.\n", totalWords)
+	fmt.Printf("✅ Analysis seeded: %d tokens (%d skipped: no matching BSB verse).\n", totalWords, droppedNoVerse)
 }
 
 func seedVersification(db *sql.DB, path string) {
@@ -571,16 +679,71 @@ func expandAndInsert(stmt *sql.Stmt, mType, kjvRaw, hebRaw, lxxRaw string) {
 	}
 }
 
-// Helper to turn "Exo.37:1-3" into "EXO.37.1" (taking the start of the range)
+// normalizeRef turns any verse reference ("2Kgs.5:12", "Exo.37:1-3",
+// "Psa.3.1(3.2)", "1Jn.1.1") into the canonical verses.id form ("2KI.5.12",
+// "EXO.37.1", "PSA.3.1", "1JO.1.1"). The book token is routed through
+// canonicalBookCode so OSIS/STEP/full-name spellings all converge; alternate
+// versification parentheticals and range ends are dropped.
 func normalizeRef(ref string) string {
-	ref = strings.ToUpper(strings.TrimSpace(ref))
-	if strings.Contains(ref, "-") {
-		ref = strings.Split(ref, "-")[0]
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
 	}
-	// Handle both Colons and spaces to ensure "MAT 1:1" becomes "MAT.1.1"
+	if i := strings.IndexByte(ref, '('); i >= 0 { // strip "(3.2)" alt-versification
+		ref = ref[:i]
+	}
+	if i := strings.IndexByte(ref, '-'); i >= 0 { // keep the start of a range
+		ref = ref[:i]
+	}
 	ref = strings.ReplaceAll(ref, ":", ".")
 	ref = strings.ReplaceAll(ref, " ", ".")
-	return ref
+	ref = strings.TrimSpace(ref)
+	parts := strings.SplitN(ref, ".", 2)
+	if len(parts) < 2 {
+		return canonicalBookCode(ref)
+	}
+	return canonicalBookCode(parts[0]) + "." + strings.ToUpper(parts[1])
+}
+
+// expandRefRange turns a possibly-ranged reference ("Col.1.16-Col.1.17") into
+// the list of individual canonical verse ids it covers. Same-chapter numeric
+// ranges are fully expanded; cross-chapter ranges keep both endpoints.
+func expandRefRange(ref string) []string {
+	ref = strings.TrimSpace(ref)
+	start := normalizeRef(ref)
+	if !strings.Contains(ref, "-") {
+		return []string{start}
+	}
+	seg := strings.SplitN(ref, "-", 2)
+	endNorm := normalizeRef(seg[1])
+	sp := strings.Split(start, ".")
+	ep := strings.Split(endNorm, ".")
+	if len(sp) != 3 {
+		return []string{start}
+	}
+	// The end may be a full ref ("Col.1.17") or a bare verse number ("17").
+	endBook, endChap, endVerse := sp[0], sp[1], ""
+	switch len(ep) {
+	case 3:
+		endBook, endChap, endVerse = ep[0], ep[1], ep[2]
+	case 1:
+		endVerse = ep[0]
+	default:
+		return []string{start}
+	}
+	if endBook != sp[0] || endChap != sp[1] {
+		return []string{start, endNorm} // cross-chapter: don't invent verses
+	}
+	s, err1 := strconv.Atoi(sp[2])
+	e, err2 := strconv.Atoi(endVerse)
+	if err1 != nil || err2 != nil || e < s || e-s > 300 {
+		return []string{start}
+	}
+	out := make([]string, 0, e-s+1)
+	for i := s; i <= e; i++ {
+		out = append(out, fmt.Sprintf("%s.%s.%d", sp[0], sp[1], i))
+	}
+	return out
 }
 
 func SeedGeographySuite(db *sql.DB, baseDir string) {
@@ -741,6 +904,138 @@ func SeedGeographySuite(db *sql.DB, baseDir string) {
 		log.Fatalf("Failed to commit: %v", err)
 	}
 	log.Println("✅ Geography integrated with working Wikimedia links.")
+}
+
+// --- Geometry preservation ---
+//
+// geometry.jsonl describes the map SHAPE of each geographic feature: whether it
+// is land or water, what kind of shape it is (polygon region, path/route,
+// isobands = probability heat-bands for uncertain sites, etc.), and — for a
+// subset of records — an inline coordinate ring under "suggested". The full,
+// detailed shapes live in external .geojson files referenced by *_geojson_file
+// (not shipped in this repo). We preserve BOTH: the inline coordinates we have,
+// and the external filename so the client can fetch full detail once hosted.
+
+type geometrySuggested struct {
+	RoughBoundary       []string `json:"rough_boundary"`
+	LabelLine           []string `json:"label_line"`
+	LabelLineHorizontal []string `json:"label_line_horizontal"`
+}
+
+type geometryRecord struct {
+	Name              string             `json:"name"`
+	Geometry          string             `json:"geometry"`
+	LandOrWater       string             `json:"land_or_water"`
+	GeojsonFile       string             `json:"geojson_file"`
+	SimplifiedGeojson string             `json:"simplified_geojson_file"`
+	IsobandsGeojson   string             `json:"isobands_geojson_file"`
+	Suggested         *geometrySuggested `json:"suggested"`
+}
+
+// geometryOut is the JSON shape stored on locations.geometry and sent to the
+// client. Coordinates are [lon, lat] pairs (GeoJSON axis order).
+type geometryOut struct {
+	Kind         string       `json:"kind"`
+	LandOrWater  string       `json:"land_or_water,omitempty"`
+	Boundary     [][2]float64 `json:"boundary,omitempty"`
+	LabelLine    [][2]float64 `json:"label_line,omitempty"`
+	ExternalFile string       `json:"external_file,omitempty"`
+}
+
+func parseCoordList(pairs []string) [][2]float64 {
+	out := make([][2]float64, 0, len(pairs))
+	for _, p := range pairs {
+		xy := strings.Split(p, ",")
+		if len(xy) != 2 {
+			continue
+		}
+		lon, err1 := strconv.ParseFloat(strings.TrimSpace(xy[0]), 64)
+		lat, err2 := strconv.ParseFloat(strings.TrimSpace(xy[1]), 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		out = append(out, [2]float64{lon, lat})
+	}
+	return out
+}
+
+func SeedGeometry(db *sql.DB, baseDir string) {
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("⚠️ geometry: begin tx: %v", err)
+		return
+	}
+	// Index existing locations by normalized name (built after all merges).
+	_, byName, err := loadLocationIndex(tx)
+	if err != nil {
+		log.Printf("⚠️ geometry: load index: %v", err)
+		tx.Rollback()
+		return
+	}
+
+	// Fill when empty; a record WITH inline coordinates (hasCoords=1) always wins
+	// over a coordinate-less one so multiple records per location don't clobber
+	// the usable geometry.
+	stmt, err := tx.Prepare(`UPDATE locations SET geometry = ?
+		WHERE id = ? AND (geometry IS NULL OR geometry = '' OR ? = 1)`)
+	if err != nil {
+		log.Printf("⚠️ geometry: prepare: %v", err)
+		tx.Rollback()
+		return
+	}
+	defer stmt.Close()
+
+	attached, withCoords, unmatched := 0, 0, 0
+	loadJSONL(baseDir+"/geometry.jsonl", func(line []byte) {
+		var r geometryRecord
+		if json.Unmarshal(line, &r) != nil {
+			return
+		}
+		id, ok := byName[normalizeLocationName(r.Name)]
+		if !ok {
+			unmatched++ // mostly modern/non-biblical features not in our table
+			return
+		}
+
+		out := geometryOut{Kind: r.Geometry, LandOrWater: r.LandOrWater}
+		switch { // prefer the smallest full-detail file the client would fetch
+		case r.SimplifiedGeojson != "":
+			out.ExternalFile = r.SimplifiedGeojson
+		case r.GeojsonFile != "":
+			out.ExternalFile = r.GeojsonFile
+		case r.IsobandsGeojson != "":
+			out.ExternalFile = r.IsobandsGeojson
+		}
+		if r.Suggested != nil {
+			out.Boundary = parseCoordList(r.Suggested.RoughBoundary)
+			out.LabelLine = parseCoordList(r.Suggested.LabelLine)
+			if len(out.LabelLine) == 0 {
+				out.LabelLine = parseCoordList(r.Suggested.LabelLineHorizontal)
+			}
+		}
+
+		blob, err := json.Marshal(out)
+		if err != nil {
+			return
+		}
+		hasCoords := 0
+		if len(out.Boundary) > 0 {
+			hasCoords = 1
+		}
+		if res, err := stmt.Exec(string(blob), id, hasCoords); err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				attached++
+				withCoords += hasCoords
+			}
+		}
+	})
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("⚠️ geometry: commit: %v", err)
+		return
+	}
+	fmt.Printf("✅ Geometry attached to %d locations (%d with inline coordinates; %d source features unmatched).\n",
+		attached, withCoords, unmatched)
 }
 
 // loadJSONL opens a file and executes a callback function for every line.
@@ -966,14 +1261,27 @@ func SeedTheographicData(db *sql.DB, baseDir string) {
 		}
 	})
 
-	// 6. Seed Events (Fixed: Adding event_verses bridge)
+	// 6. Seed Events (event_verses + event_participants bridges)
 	seedFile(baseDir+"/events.json", func(id string, f map[string]interface{}) {
 		tx.Exec("INSERT OR REPLACE INTO events (id, title, start_date, duration, sort_key) VALUES (?, ?, ?, ?, ?)",
 			id, getString(f, "title"), getString(f, "startDate"), getString(f, "duration"), f["sortKey"])
 
 		if verses, ok := f["verses"].([]interface{}); ok {
 			for _, vID := range verses {
-				tx.Exec("INSERT OR IGNORE INTO event_verses (event_id, verse_id) VALUES (?, ?)", id, vID)
+				if s, ok := vID.(string); ok {
+					tx.Exec("INSERT OR IGNORE INTO event_verses (event_id, verse_id) VALUES (?, ?)", id, s)
+				}
+			}
+		}
+
+		// participants links people (and occasionally groups) to the event.
+		// Previously ignored, leaving event_participants empty and the
+		// "who took part in this event" lookup dead.
+		if participants, ok := f["participants"].([]interface{}); ok {
+			for _, pID := range participants {
+				if s, ok := pID.(string); ok {
+					tx.Exec("INSERT OR IGNORE INTO event_participants (event_id, participant_id) VALUES (?, ?)", id, s)
+				}
 			}
 		}
 	})
@@ -1026,18 +1334,26 @@ func SeedCrossReferences(db *sql.DB, filePath string) {
 	// Skip header line if it exists
 	scanner.Scan()
 
+	inserted := 0
 	for scanner.Scan() {
 		parts := strings.Split(scanner.Text(), "\t")
 		if len(parts) < 2 {
 			continue
 		}
 
-		// Normalize to UPPERCASE to match your 'verses' table IDs
-		from := strings.ToUpper(parts[0])
-		to := strings.ToUpper(parts[1])
-
-		tx.Exec("INSERT OR IGNORE INTO cross_references (from_verse, to_verse) VALUES (?, ?)", from, to)
+		// Source uses OSIS codes (Deut, Ps, Matt, 1Kgs, Song...) and ranges
+		// (Col.1.16-Col.1.17). Route both sides through the canonical resolver
+		// and expand ranges so all 66 books survive the from/to verse FKs.
+		for _, from := range expandRefRange(parts[0]) {
+			for _, to := range expandRefRange(parts[1]) {
+				if res, err := tx.Exec("INSERT OR IGNORE INTO cross_references (from_verse, to_verse) VALUES (?, ?)", from, to); err == nil {
+					if n, _ := res.RowsAffected(); n > 0 {
+						inserted++
+					}
+				}
+			}
+		}
 	}
 	tx.Commit()
-	log.Println("Cross-references seeded.")
+	fmt.Printf("✅ Cross-references seeded: %d links.\n", inserted)
 }

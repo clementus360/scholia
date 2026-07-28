@@ -1,38 +1,37 @@
 package api
 
 import (
-	"database/sql"
-
 	"github.com/clementus360/scholia/internal/auth"
 	"github.com/clementus360/scholia/internal/handlers"
 	httputil "github.com/clementus360/scholia/internal/http"
+	"github.com/clementus360/scholia/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-// NewRouter creates and configures the main router with all routes
-func NewRouter(db *sql.DB, authManager *auth.Manager) chi.Router {
+// NewRouter creates and configures the main router with all routes.
+//
+// Handlers are given only the databases they need: most read the Bible corpus
+// alone, auth touches only Postgres, and notes/verse span both.
+func NewRouter(stores *storage.Stores, authManager *auth.Manager) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(httputil.CORS(nil))
-	if authManager != nil {
-		r.Use(authManager.Optional)
-	}
+	r.Use(authManager.Optional)
 
 	// Initialize handlers
-	verseHandler := handlers.NewVerseHandler(db)
-	lexiconHandler := handlers.NewLexiconHandler(db)
-	geographyHandler := handlers.NewGeographyHandler(db)
-	historyHandler := handlers.NewHistoryHandler(db)
-	notesHandler := handlers.NewNotesHandler(db)
-	discoveryHandler := handlers.NewDiscoveryHandler(db)
-	navigationHandler := handlers.NewNavigationHandler(db)
-	resolveHandler := handlers.NewResolveHandler(db)
-	authHandler := handlers.NewAuthHandler(db)
-	adminHandler := handlers.NewAdminHandler(db)
+	verseHandler := handlers.NewVerseHandler(stores)
+	lexiconHandler := handlers.NewLexiconHandler(stores.Bible)
+	geographyHandler := handlers.NewGeographyHandler(stores.Bible)
+	historyHandler := handlers.NewHistoryHandler(stores.Bible)
+	notesHandler := handlers.NewNotesHandler(stores)
+	discoveryHandler := handlers.NewDiscoveryHandler(stores.Bible)
+	navigationHandler := handlers.NewNavigationHandler(stores.Bible)
+	resolveHandler := handlers.NewResolveHandler(stores.Bible)
+	authHandler := handlers.NewAuthHandler(stores.Users, authManager)
 
 	// API routes
 	r.Route("/api/v1", func(r chi.Router) {
@@ -68,8 +67,22 @@ func NewRouter(db *sql.DB, authManager *auth.Manager) chi.Router {
 
 		// Resolver endpoint
 		r.Get("/resolve/{rec_id}", resolveHandler.ResolveRecID)
+
+		// Auth endpoints.
+		//
+		// There is no sign-up or sign-in route here by design: the client does
+		// those directly against Supabase (email, Google, magic link, ...) and
+		// sends the resulting access token. This API only validates it.
 		r.Get("/auth/me", authHandler.Me)
-		r.Post("/auth/exchange-code", authHandler.ExchangeCode)
+
+		// API keys, for clients that cannot refresh a session. Session-only —
+		// see AuthHandler.sessionPrincipal.
+		r.Group(func(r chi.Router) {
+			r.Use(authManager.RequireScopes("read"))
+			r.Get("/auth/api-keys", authHandler.ListAPIKeys)
+			r.Post("/auth/api-keys", authHandler.CreateAPIKey)
+			r.Delete("/auth/api-keys/{key_id}", authHandler.RevokeAPIKey)
+		})
 
 		// Notes endpoints
 		r.Group(func(r chi.Router) {
@@ -82,10 +95,6 @@ func NewRouter(db *sql.DB, authManager *auth.Manager) chi.Router {
 			r.Post("/notes", notesHandler.CreateNote)
 			r.Put("/notes/{note_id}", notesHandler.UpdateNote)
 			r.Delete("/notes/{note_id}", notesHandler.DeleteNote)
-		})
-		r.Group(func(r chi.Router) {
-			r.Use(authManager.RequireAdmin())
-			r.Post("/admin/invites", adminHandler.CreateInvite)
 		})
 	})
 

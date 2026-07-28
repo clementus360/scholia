@@ -34,3 +34,15 @@ go.work
 # Build output
 bin/
 dist/
+
+# Compiled command binaries (built from cmd/)
+/api
+/seed
+
+# Generated Bible database. Rebuilt from data/ sources via `go run ./cmd/seed`
+# and shipped as a build artifact, never committed. The -wal/-shm sidecars are
+# only meaningful against the exact db file they were checkpointed from, so
+# committing them risks handing out a mismatched, corrupt set.
+data/bible.db
+data/bible.db-shm
+data/bible.db-wal

@@ -11,12 +11,16 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// VerseHandler serves verse detail. Almost everything it reads comes from the
+// Bible corpus, but the "notes on this verse" section reaches into Postgres, so
+// it holds both handles.
 type VerseHandler struct {
-	db *sql.DB
+	bible *sql.DB
+	users *sql.DB
 }
 
-func NewVerseHandler(db *sql.DB) *VerseHandler {
-	return &VerseHandler{db: db}
+func NewVerseHandler(stores *storage.Stores) *VerseHandler {
+	return &VerseHandler{bible: stores.Bible, users: stores.Users}
 }
 
 type VerseRangeResponse struct {
@@ -29,7 +33,7 @@ type VerseRangeResponse struct {
 // GetVerse handles GET /api/v1/verse/{osis_id}
 func (h *VerseHandler) GetVerse(w http.ResponseWriter, r *http.Request) {
 	reference := chi.URLParam(r, "osis_id")
-	result, err := storage.GetVerseRangeByReference(h.db, reference)
+	result, err := storage.GetVerseRangeByReference(h.bible, reference)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -111,7 +115,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rangeResult, err := storage.GetVerseRangeByReference(h.db, reference)
+	rangeResult, err := storage.GetVerseRangeByReference(h.bible, reference)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -123,7 +127,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 
 	if len(rangeResult.Verses) == 1 && rangeResult.Start == rangeResult.End {
 		osisID := rangeResult.Verses[0].ID
-		verse, err := storage.GetVerseByID(h.db, osisID)
+		verse, err := storage.GetVerseByID(h.bible, osisID)
 		if err != nil {
 			httputil.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -133,43 +137,43 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		analysis, err := storage.GetVerseAnalysisByVerseID(h.db, osisID)
+		analysis, err := storage.GetVerseAnalysisByVerseID(h.bible, osisID)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (analysis): %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		locations, err := storage.GetLocationsByVerseID(h.db, osisID)
+		locations, err := storage.GetLocationsByVerseID(h.bible, osisID)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (locations): %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		people, err := storage.GetPeopleByVerseID(h.db, osisID)
+		people, err := storage.GetPeopleByVerseID(h.bible, osisID)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (people): %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		groups, err := storage.GetGroupsByVerseID(h.db, osisID)
+		groups, err := storage.GetGroupsByVerseID(h.bible, osisID)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (groups): %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		events, err := storage.GetEventsByVerseID(h.db, osisID)
+		events, err := storage.GetEventsByVerseID(h.bible, osisID)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (events): %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		crossReferences, err := storage.GetCrossReferencesByVerseID(h.db, osisID, pagination.Limit, pagination.Offset)
+		crossReferences, err := storage.GetCrossReferencesByVerseID(h.bible, osisID, pagination.Limit, pagination.Offset)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (cross_references): %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		notes, err := storage.GetNotesByVerseID(h.db, ownerID, osisID, pagination.Limit, pagination.Offset)
+		notes, err := storage.GetNotesByVerseID(r.Context(), h.users, ownerID, osisID, pagination.Limit, pagination.Offset)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (notes): %v", err), http.StatusInternalServerError)
 			return
@@ -221,7 +225,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 	notesOrdered := make([]storage.Note, 0)
 
 	for _, verse := range rangeResult.Verses {
-		analysis, err := storage.GetVerseAnalysisByVerseID(h.db, verse.ID)
+		analysis, err := storage.GetVerseAnalysisByVerseID(h.bible, verse.ID)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (analysis): %v", err), http.StatusInternalServerError)
 			return
@@ -234,7 +238,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		locations, err := storage.GetLocationsByVerseID(h.db, verse.ID)
+		locations, err := storage.GetLocationsByVerseID(h.bible, verse.ID)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (locations): %v", err), http.StatusInternalServerError)
 			return
@@ -243,7 +247,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			locationByID[item.ID] = item
 		}
 
-		people, err := storage.GetPeopleByVerseID(h.db, verse.ID)
+		people, err := storage.GetPeopleByVerseID(h.bible, verse.ID)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (people): %v", err), http.StatusInternalServerError)
 			return
@@ -252,7 +256,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			peopleByID[item.ID] = item
 		}
 
-		groups, err := storage.GetGroupsByVerseID(h.db, verse.ID)
+		groups, err := storage.GetGroupsByVerseID(h.bible, verse.ID)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (groups): %v", err), http.StatusInternalServerError)
 			return
@@ -261,7 +265,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			groupsByID[item.ID] = item
 		}
 
-		events, err := storage.GetEventsByVerseID(h.db, verse.ID)
+		events, err := storage.GetEventsByVerseID(h.bible, verse.ID)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (events): %v", err), http.StatusInternalServerError)
 			return
@@ -270,7 +274,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			eventsByID[item.ID] = item
 		}
 
-		refs, err := storage.GetCrossReferencesByVerseID(h.db, verse.ID, 1000, 0)
+		refs, err := storage.GetCrossReferencesByVerseID(h.bible, verse.ID, 1000, 0)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (cross_references): %v", err), http.StatusInternalServerError)
 			return
@@ -283,7 +287,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			crossReferences = append(crossReferences, ref)
 		}
 
-		noteItems, err := storage.GetNotesByVerseID(h.db, ownerID, verse.ID, 1000, 0)
+		noteItems, err := storage.GetNotesByVerseID(r.Context(), h.users, ownerID, verse.ID, 1000, 0)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (notes): %v", err), http.StatusInternalServerError)
 			return
@@ -347,7 +351,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 // GetVerseCrossReferences handles GET /api/v1/verse/{osis_id}/cross-references
 func (h *VerseHandler) GetVerseCrossReferences(w http.ResponseWriter, r *http.Request) {
 	reference := chi.URLParam(r, "osis_id")
-	rangeResult, err := storage.GetVerseRangeByReference(h.db, reference)
+	rangeResult, err := storage.GetVerseRangeByReference(h.bible, reference)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -364,7 +368,7 @@ func (h *VerseHandler) GetVerseCrossReferences(w http.ResponseWriter, r *http.Re
 	}
 
 	if len(rangeResult.Verses) == 1 && rangeResult.Start == rangeResult.End {
-		references, err := storage.GetCrossReferencesByVerseID(h.db, rangeResult.Verses[0].ID, pagination.Limit, pagination.Offset)
+		references, err := storage.GetCrossReferencesByVerseID(h.bible, rangeResult.Verses[0].ID, pagination.Limit, pagination.Offset)
 		if err != nil {
 			httputil.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -377,7 +381,7 @@ func (h *VerseHandler) GetVerseCrossReferences(w http.ResponseWriter, r *http.Re
 	references := make([]string, 0)
 	seen := map[string]struct{}{}
 	for _, verse := range rangeResult.Verses {
-		items, err := storage.GetCrossReferencesByVerseID(h.db, verse.ID, 1000, 0)
+		items, err := storage.GetCrossReferencesByVerseID(h.bible, verse.ID, 1000, 0)
 		if err != nil {
 			httputil.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -406,7 +410,7 @@ func (h *VerseHandler) GetVerseCrossReferences(w http.ResponseWriter, r *http.Re
 // GetVerseAnalysis handles GET /api/v1/analysis/{osis_id}
 func (h *VerseHandler) GetVerseAnalysis(w http.ResponseWriter, r *http.Request) {
 	reference := chi.URLParam(r, "osis_id")
-	rangeResult, err := storage.GetVerseRangeByReference(h.db, reference)
+	rangeResult, err := storage.GetVerseRangeByReference(h.bible, reference)
 	if err != nil {
 		httputil.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -418,7 +422,7 @@ func (h *VerseHandler) GetVerseAnalysis(w http.ResponseWriter, r *http.Request) 
 
 	if len(rangeResult.Verses) == 1 && rangeResult.Start == rangeResult.End {
 		verse := rangeResult.Verses[0]
-		analysis, err := storage.GetAnalysisByVerseID(h.db, verse.ID)
+		analysis, err := storage.GetAnalysisByVerseID(h.bible, verse.ID)
 		if err != nil {
 			httputil.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -431,7 +435,7 @@ func (h *VerseHandler) GetVerseAnalysis(w http.ResponseWriter, r *http.Request) 
 	analysisByVerse := map[string][]storage.VerseAnalysisToken{}
 	flatAnalysis := make([]storage.VerseAnalysisToken, 0)
 	for _, verse := range rangeResult.Verses {
-		analysis, err := storage.GetAnalysisByVerseID(h.db, verse.ID)
+		analysis, err := storage.GetAnalysisByVerseID(h.bible, verse.ID)
 		if err != nil {
 			httputil.Error(w, "Database error", http.StatusInternalServerError)
 			return

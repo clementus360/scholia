@@ -37,7 +37,7 @@ All endpoints use the same envelope.
 {
   "success": false,
   "error": {
-    "message": "Missing or invalid API key"
+    "message": "Missing or invalid credentials"
   }
 }
 ```
@@ -50,94 +50,49 @@ Notes:
 
 ## 3. Authentication
 
-Current auth is API-key based and intentionally simple so it can be upgraded to full user auth later.
+Auth is Supabase-backed. Users sign in on the client with any enabled provider
+and the API verifies the resulting access token locally against the project's
+public signing keys — no per-request round trip, and no credential held by this
+server.
 
 ### Send auth in one of these headers
 
-- `X-API-Key: <token>`
-- `Authorization: Bearer <token>`
+- `Authorization: Bearer <token>` — a Supabase access token, or an API key
+- `X-API-Key: <token>` — an API key
 
 ### Auth check endpoint
 
-- `GET /api/v1/auth/me`
+- `GET /api/v1/auth/me` — returns `authenticated:false` with HTTP 200 when
+  signed out, so the frontend can call it unconditionally
 
-### Invite-code login
+### Sign in
 
-For testing and onboarding, the backend supports one-time invite codes.
+Authentication is handled entirely by Supabase on the client. Sign in with
+`supabase-js` using any enabled provider — email/password, Google, magic link,
+passkeys — then send the resulting access token:
 
-#### Admin-only code creation
-
-- `POST /api/v1/admin/invites`
-
-This endpoint is protected and only works when the authenticated user matches `SCHOLIA_ADMIN_SUBJECT` or `SCHOLIA_ADMIN_USER_ID`.
-
-Example admin env vars:
-
-```bash
-export SCHOLIA_ADMIN_SUBJECT="dev"
-# or
-export SCHOLIA_ADMIN_USER_ID="usr_xxx"
+```
+Authorization: Bearer <access_token>
 ```
 
-Security note: set one (or both) in deployment. If neither is set, admin-only routes return 503 (`Admin access not configured`).
+`supabase-js` refreshes the token automatically. This API has no sign-up or
+sign-in endpoint by design: routing credentials through it would mean managing
+refresh tokens server-side for no benefit. It only verifies tokens, against
+public keys, with no network round trip per request.
 
-#### Code exchange
+Enabling a new provider needs **no backend change**.
 
-- `POST /api/v1/auth/exchange-code`
+### API keys
 
-Request body:
+For scripts and integrations that cannot run Supabase's refresh cycle.
 
-```json
-{
-  "code": "ABCD-EFGH-IJKL-MNOP"
-}
-```
+- `GET /api/v1/auth/api-keys` — list your keys (tokens are never returned)
+- `POST /api/v1/auth/api-keys` — mint one; the plaintext token is in the response **once**
+- `DELETE /api/v1/auth/api-keys/{key_id}` — revoke, effective immediately
 
-On success, the server creates a private user and API key, then returns the API key once. The code cannot be reused.
-
-Unauthenticated response:
-
-```json
-{
-  "success": true,
-  "data": {
-    "authenticated": false
-  }
-}
-```
-
-Authenticated response example:
-
-```json
-{
-  "success": true,
-  "data": {
-    "type": "api-key",
-    "user_id": "usr_xxx",
-    "key_id": "key_xxx",
-    "subject": "dev",
-    "display_name": "Dev",
-    "scopes": ["read", "write"],
-    "authenticated": true,
-    "authentication": "api-key"
-  }
-}
-```
-
-### Protected routes
-
-Notes now require authentication for both read and write operations.
-
-Read operations require `read` scope:
-
-- `GET /api/v1/notes`
-- `GET /api/v1/notes/{note_id}`
-
-Write operations require `write` scope:
-
-- `POST /api/v1/notes`
-- `PUT /api/v1/notes/{note_id}`
-- `DELETE /api/v1/notes/{note_id}`
+Send keys as `Authorization: Bearer …` or `X-API-Key: …`. Two deliberate
+restrictions: a key cannot manage keys (those endpoints require a session), and
+a key cannot hold scopes beyond `read` and `write`.
 
 ## 4. CORS for Local Testing
 
@@ -632,31 +587,39 @@ async function apiFetch<T>(
 }
 ```
 
-## 11. Local Dev Auth Defaults
+## 11. Storage Architecture and Auth Setup
 
-By default, bootstrap now requires explicit auth configuration.
+Scholia uses two databases with deliberately different lifecycles:
 
-Set one of these:
+| Data | Store | Lifecycle |
+| --- | --- | --- |
+| Bible corpus, lexicon, geography, history | Read-only SQLite baked into the image | Disposable — rebuilt from `data/` by `cmd/seed` |
+| Accounts, API keys, notes | Supabase Postgres | Durable — survives every deploy |
 
-- `SCHOLIA_AUTH_KEYS`
-- `SCHOLIA_AUTH_TOKEN`
+These previously shared one SQLite file, which was also committed to git.
+Rebuilding the corpus — or just switching branches — destroyed user accounts and
+notes. Keeping them apart is what fixes that. `data/bible.db` is now gitignored
+and generated, never committed.
 
-For local-only development, you can opt in to a generated dev key:
+Required environment (see `.env.example` for the annotated version):
 
 ```bash
-export SCHOLIA_ALLOW_DEV_KEY=true
+DATABASE_URL=…                    # Supabase Postgres, session pooler
+SUPABASE_URL=…                    # https://<ref>.supabase.co
 ```
 
-When enabled, bootstrap creates:
+That is the whole server configuration. No Supabase API key is required: the API
+only verifies tokens, using public keys. The publishable key belongs in your
+frontend; the secret key is not used at all.
 
-- token: `scholia-dev`
+Full setup — project creation, applying `migrations/0001_init.sql`, enabling
+asymmetric JWT signing keys, and creating the first admin — is in
+[`docs/supabase-setup.md`](docs/supabase-setup.md).
 
-Recommended for real environments:
-
-1. Set `SCHOLIA_AUTH_KEYS` with explicit keys and scopes.
-2. Store keys in secrets manager, not in frontend code.
-3. Set `SCHOLIA_ADMIN_USER_ID` (or `SCHOLIA_ADMIN_SUBJECT`) for admin-only invite minting.
-4. Prefer a backend proxy for privileged operations.
+The project **must** use asymmetric JWT signing keys. Access tokens are verified
+locally against the project's public keys, which is what keeps authentication
+free of a network round trip per request; a project still on the legacy shared
+HS256 secret publishes no usable public key and every token will fail to verify.
 
 ## 12. Quick Test Commands
 
@@ -667,25 +630,28 @@ curl -s "http://localhost:8080/api/v1/books?limit=2&offset=0" | jq .
 # Auth session (anonymous)
 curl -s "http://localhost:8080/api/v1/auth/me" | jq .
 
-# Auth session (with key)
-curl -s "http://localhost:8080/api/v1/auth/me" -H "X-API-Key: scholia-dev" | jq .
+# Auth session (signed in). TOKEN is a Supabase access token —
+# `supabase.auth.getSession()` in the browser, or the redemption response below.
+curl -s "http://localhost:8080/api/v1/auth/me" -H "Authorization: Bearer $TOKEN" | jq .
 
 # Protected write
 curl -s -X POST "http://localhost:8080/api/v1/notes" \
-  -H "X-API-Key: scholia-dev" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"title":"Demo","main_reference":"GEN.1.1","content":"...","verse_ids":["GEN.1.1"]}' | jq .
 
-# Admin mint invite (only if SCHOLIA_ADMIN_SUBJECT or SCHOLIA_ADMIN_USER_ID matches)
-curl -s -X POST "http://localhost:8080/api/v1/admin/invites" \
-  -H "X-API-Key: scholia-dev" \
+# Mint an API key for a script (session auth required)
+curl -s -X POST "http://localhost:8080/api/v1/auth/api-keys" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"label":"tester-one","scopes":["read","write"]}' | jq .
+  -d '{"label":"my script","scopes":["read"]}' | jq .
 
-# Exchange invite code for a private API key
-curl -s -X POST "http://localhost:8080/api/v1/auth/exchange-code" \
-  -H "Content-Type: application/json" \
-  -d '{"code":"ABCD-EFGH-IJKL-MNOP"}' | jq .
+# Use that key (the token is only shown once, at creation)
+curl -s "http://localhost:8080/api/v1/notes" -H "X-API-Key: sk_scholia_..." | jq .
+
+# Revoke it
+curl -s -X DELETE "http://localhost:8080/api/v1/auth/api-keys/$KEY_ID" \
+  -H "Authorization: Bearer $TOKEN" | jq .
 ```
 
 ## 13. Frontend Change Log and Migration Notes
@@ -735,19 +701,21 @@ This section summarizes all frontend-relevant changes introduced in the recent b
 - `verse_ids` can include single references or ranges.
 - Ranges are expanded server-side into individual verse IDs before save.
 
-8. Invite-code onboarding was introduced
+8. **Breaking:** authentication moved to Supabase, invites removed
 
-- New tester flow:
-  - Admin mints one-time code: `POST /api/v1/admin/invites`
-  - User exchanges code for API key: `POST /api/v1/auth/exchange-code`
-- Codes are single-use and cannot be redeemed twice.
+- Sign-up and sign-in happen on the client via `supabase-js` with any enabled
+  provider (email, Google, magic link, passkeys). This API has no sign-in route.
+- Send `Authorization: Bearer <access_token>`; `supabase-js` handles refresh.
+- The old permanent API key and the invite-code flow are gone, along with
+  `POST /api/v1/auth/exchange-code` and `POST /api/v1/admin/invites`.
+- Access is open: anyone signed in can read and write their own notes. Notes
+  stay private to their owner.
 
-9. Admin gate for invite minting is env-driven
+9. API keys are now self-service
 
-- Invite minting only works for authenticated principal matching:
-  - `SCHOLIA_ADMIN_SUBJECT`, or
-  - `SCHOLIA_ADMIN_USER_ID`
-- Frontend should treat invite creation as a privileged admin action.
+- `GET`/`POST /api/v1/auth/api-keys`, `DELETE /api/v1/auth/api-keys/{key_id}`.
+- For scripts that cannot run a refresh cycle. Session-authenticated only; a key
+  cannot mint or revoke keys.
 
 10. Lexicon endpoint now includes usage occurrences
 
@@ -757,14 +725,25 @@ This section summarizes all frontend-relevant changes introduced in the recent b
 ### Frontend migration checklist
 
 1. Ensure all API calls parse the shared envelope and show `error.message` on failure.
-2. Update note list/detail/create/update/delete calls to always send API key auth.
-3. Add auth bootstrap on app load using `GET /api/v1/auth/me`.
-4. Add invite-code login screen that posts to `POST /api/v1/auth/exchange-code`.
-5. Store returned API key securely in client storage strategy used by your app.
-6. Update verse, context, cross-reference, and analysis screens to handle range payloads.
-7. Keep existing single-verse rendering path, but branch to range rendering when `verses` exists.
-8. Update note editor to allow range references in `verse_ids`.
-9. If admin UI exists, gate invite creation UI behind admin-authenticated state.
+2. Install `supabase-js` and initialise it with your project URL and
+   **publishable** key (`sb_publishable_…`). Never put the secret key in the
+   frontend.
+3. Replace the stored API key with a Supabase session. Build sign-in with
+   whichever providers you enable — `signInWithPassword`, `signInWithOAuth({provider:'google'})`,
+   `signInWithOtp` for magic links.
+4. Attach `Authorization: Bearer ${session.access_token}` to every authenticated
+   request, reading the session from `supabase.auth.getSession()` so you always
+   get the refreshed token.
+5. Subscribe to `supabase.auth.onAuthStateChange` to react to sign-in, sign-out
+   and token refresh rather than caching the token yourself.
+6. Add auth bootstrap on app load using `GET /api/v1/auth/me`. It returns
+   `authenticated:false` with HTTP 200 when signed out, so it is safe to call
+   unconditionally.
+7. Update verse, context, cross-reference, and analysis screens to handle range payloads.
+8. Keep existing single-verse rendering path, but branch to range rendering when `verses` exists.
+9. Update note editor to allow range references in `verse_ids`.
+10. Note `created_at` / `updated_at` are RFC 3339 (`2026-07-28T06:11:36+02:00`)
+    rather than SQLite's `2026-07-28 06:11:36`.
 
 ### Recommended frontend response handling pattern for verse endpoints
 

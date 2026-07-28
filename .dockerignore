@@ -1,0 +1,25 @@
+# Secrets — must never enter the build context.
+.env
+.env.local
+.env.*.local
+
+# The corpus is generated inside the image by the `corpus` stage. Copying a
+# local build in would both bloat the context by ~90MB and risk shipping a
+# database still in WAL mode, which the API cannot open read-only.
+data/bible.db
+data/bible.db-shm
+data/bible.db-wal
+
+# Locally built binaries.
+/api
+/seed
+bin/
+dist/
+
+.git
+.gitignore
+.claude
+.idea
+.vscode
+.DS_Store
+README.md

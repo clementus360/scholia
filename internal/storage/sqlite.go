@@ -2,7 +2,8 @@ package storage
 
 import (
 	"database/sql"
-	"log"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -59,33 +60,122 @@ func ResolveDBPath(defaultPath string) string {
 	return defaultPath
 }
 
-func InitDB(filepath string) *sql.DB {
-	db, err := sql.Open("sqlite3", filepath)
+// OpenBibleDB opens the Bible corpus read-only.
+//
+// This file is baked into the container image and lives on a read-only layer,
+// which constrains how it may be opened:
+//
+//   - WAL mode is not usable. A WAL reader must create and write the -shm
+//     shared-memory file even when it only ever reads, so a WAL-mode database
+//     on a read-only filesystem fails to open at all. cmd/seed therefore
+//     checkpoints and switches the file back to rollback journalling before
+//     shipping it (see FinalizeBibleDB).
+//   - The database must be self-contained. A leftover -wal sidecar would carry
+//     committed data that a read-only handle cannot replay.
+//
+// Missing files are reported as errors rather than being created silently:
+// SQLite will happily conjure an empty database, and an API serving zero verses
+// is far harder to diagnose than a refusal to boot.
+func OpenBibleDB(path string) (*sql.DB, error) {
+	info, err := os.Stat(path)
 	if err != nil {
-		log.Fatal(err)
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("bible database not found at %s: build it with `go run ./cmd/seed`", path)
+		}
+		return nil, fmt.Errorf("stat bible database %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("bible database path %s is a directory", path)
 	}
 
-	// Performance: WAL mode is essential for concurrent reads/writes in Go
-	_, err = db.Exec("PRAGMA journal_mode=WAL;")
-	if err != nil {
-		log.Fatalf("Failed to enable WAL: %v", err)
+	if _, err := os.Stat(path + "-wal"); err == nil {
+		return nil, fmt.Errorf(
+			"bible database %s has an un-checkpointed -wal sidecar; it is not safe to open read-only. "+
+				"Re-run `go run ./cmd/seed`, which checkpoints and finalizes the file", path)
 	}
 
-	// Relational Integrity: Must be enabled manually in SQLite
-	_, err = db.Exec("PRAGMA foreign_keys = ON;")
+	// file: URI so query parameters are honoured. Path is escaped because
+	// absolute paths on some platforms contain characters that are otherwise
+	// significant in a URI.
+	dsn := "file:" + url.PathEscape(path) + "?mode=ro"
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
-		log.Fatalf("Failed to enable foreign keys: %v", err)
+		return nil, fmt.Errorf("open bible database: %w", err)
 	}
 
-	return db
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open bible database %s read-only: %w", path, err)
+	}
+
+	// Reads are concurrent and never block each other on a read-only file, so
+	// the pool can be as wide as the HTTP server needs.
+	db.SetMaxOpenConns(envInt("SCHOLIA_BIBLE_MAX_OPEN_CONNS", 16))
+	db.SetMaxIdleConns(envInt("SCHOLIA_BIBLE_MAX_IDLE_CONNS", 8))
+
+	return db, nil
 }
 
-func CreateTables(db *sql.DB) {
+// OpenBibleDBForSeed opens the corpus read-write for cmd/seed. WAL is enabled
+// here purely for bulk-insert throughput; FinalizeBibleDB undoes it afterwards.
+func OpenBibleDBForSeed(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		return nil, fmt.Errorf("open bible database for seeding: %w", err)
+	}
+
+	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable WAL: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable foreign keys: %w", err)
+	}
+
+	return db, nil
+}
+
+// FinalizeBibleDB prepares a freshly seeded database for read-only shipping:
+// it folds the WAL back into the main file, leaves rollback-journal mode so no
+// -shm/-wal sidecars are needed at read time, and compacts the result.
+//
+// Call this at the end of seeding. Without it the API cannot open the file.
+func FinalizeBibleDB(db *sql.DB) error {
+	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE);"); err != nil {
+		return fmt.Errorf("checkpoint WAL: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA journal_mode=DELETE;"); err != nil {
+		return fmt.Errorf("switch to rollback journal: %w", err)
+	}
+	// VACUUM reclaims the churn left by repeated seeding, which is substantial
+	// on a corpus this size and ships in every image layer if left behind.
+	if _, err := db.Exec("VACUUM;"); err != nil {
+		return fmt.Errorf("vacuum: %w", err)
+	}
+
+	// Deliberately no PRAGMA optimize here. It runs ANALYZE, which on the FTS5
+	// index over the full Bible text takes longer than the entire rest of the
+	// seed — tens of minutes — in exchange for query-planner statistics this
+	// workload does not need. The queries are simple lookups against explicit
+	// indexes and FTS5 MATCH.
+	//
+	// If a future query does need stats, run ANALYZE against the specific table
+	// rather than reinstating a blanket optimize.
+	return nil
+}
+
+// CreateBibleTables provisions the corpus schema. Only cmd/seed calls this; the
+// API opens the file read-only and never migrates it.
+//
+// User-owned data (accounts, API keys, invites, notes) deliberately does NOT
+// live here. It lives in Postgres — see migrations/.
+func CreateBibleTables(db *sql.DB) error {
 	schema := `
     -- 1. Main Bible Text (Human Readable)
     CREATE TABLE IF NOT EXISTS verses (
         id TEXT PRIMARY KEY, -- e.g., 'BSB.MAT.1.1'
-        translation TEXT,   
+        translation TEXT,
         book TEXT,
         chapter INTEGER,
         verse INTEGER,
@@ -94,14 +184,14 @@ func CreateTables(db *sql.DB) {
 
     -- 2. Full-Text Search (For lightning fast search in Next.js)
     CREATE VIRTUAL TABLE IF NOT EXISTS verses_fts USING fts5(
-        osis_id UNINDEXED, 
-        translation UNINDEXED, 
+        osis_id UNINDEXED,
+        translation UNINDEXED,
         content
     );
 
     -- 3. Lexicon (Original Language Dictionaries)
     CREATE TABLE IF NOT EXISTS lexicon (
-        strongs_id TEXT PRIMARY KEY, 
+        strongs_id TEXT PRIMARY KEY,
         word TEXT,
         transliteration TEXT,
         definition TEXT
@@ -124,11 +214,14 @@ func CreateTables(db *sql.DB) {
         english_gloss TEXT,    -- Brief English meaning
         strongs_id TEXT,       -- Link to Lexicon
         morph_code TEXT,       -- Link to Morphology
-        manuscript_type TEXT,  -- N (Ancient), K (Traditional), etc.
-        FOREIGN KEY(verse_id) REFERENCES verses(id),
-        FOREIGN KEY(strongs_id) REFERENCES lexicon(strongs_id),
-        FOREIGN KEY(morph_code) REFERENCES morphology(code)
+        manuscript_type TEXT   -- N (Ancient), K (Traditional), etc.
+        -- No cross-table FKs: verse_analysis is a read-model. strongs_id and
+        -- morph_code are joined with LEFT JOINs at query time, and enforcing
+        -- FKs here silently dropped valid tokens (or forced placeholder rows)
+        -- whenever a lexicon/morphology/verse entry was missing.
     );
+    CREATE INDEX IF NOT EXISTS idx_verse_analysis_verse ON verse_analysis(verse_id);
+    CREATE INDEX IF NOT EXISTS idx_verse_analysis_strongs ON verse_analysis(strongs_id);
 
 -- 6. Versification Mapping (The bridge between BSB, KJV, and Original Texts)
 CREATE TABLE IF NOT EXISTS versification (
@@ -148,26 +241,7 @@ CREATE TABLE IF NOT EXISTS versification (
         FOREIGN KEY(to_verse) REFERENCES verses(id)
     );
 
-    -- 8. User Data: Enhanced Notes
-    CREATE TABLE IF NOT EXISTS notes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        owner_user_id TEXT,
-        title TEXT,
-        main_reference TEXT,
-        content TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-
-    -- 9. User Data: Links between notes and specific verses
-    CREATE TABLE IF NOT EXISTS note_verses (
-        note_id INTEGER,
-        verse_id TEXT,
-        FOREIGN KEY(note_id) REFERENCES notes(id),
-        FOREIGN KEY(verse_id) REFERENCES verses(id)
-    );
-
--- 10. Unified Geography Table
+-- 8. Unified Geography Table
 CREATE TABLE IF NOT EXISTS locations (
     id TEXT PRIMARY KEY,
     name TEXT,
@@ -180,18 +254,19 @@ CREATE TABLE IF NOT EXISTS locations (
     image_url TEXT,       -- Direct high-res link (e.g., Wikimedia)
     credit_url TEXT,      -- Attribution link
     image_author TEXT,    -- For the "Investigation" credits
-    source_info TEXT
+    source_info TEXT,
+    geometry TEXT         -- JSON shape data (kind, boundary ring, label line, external file). See SeedGeometry.
 );
 
--- 11. The Verse Bridge
+-- 9. The Verse Bridge
 CREATE TABLE IF NOT EXISTS verse_locations (
     verse_id TEXT,             -- e.g., '2KG.5.12'
     location_id TEXT,
     PRIMARY KEY (verse_id, location_id),
     FOREIGN KEY(location_id) REFERENCES locations(id)
-); 
+);
 
--- 11b. Alias map for merged place identities across sources
+-- 9b. Alias map for merged place identities across sources
 CREATE TABLE IF NOT EXISTS location_aliases (
     alias_id TEXT PRIMARY KEY,
     canonical_location_id TEXT NOT NULL,
@@ -201,7 +276,7 @@ CREATE TABLE IF NOT EXISTS location_aliases (
 
 CREATE INDEX IF NOT EXISTS idx_location_aliases_canonical ON location_aliases(canonical_location_id);
 
--- 12. Books & Chapters (For Navigation)
+-- 10. Books & Chapters (For Navigation)
 CREATE TABLE IF NOT EXISTS books (
     id TEXT PRIMARY KEY,
     osis_name TEXT,
@@ -219,7 +294,7 @@ CREATE TABLE IF NOT EXISTS chapters (
     FOREIGN KEY(book_id) REFERENCES books(id)
 );
 
--- 13. Historical People
+-- 11. Historical People
 CREATE TABLE IF NOT EXISTS people (
     id TEXT PRIMARY KEY,
     name TEXT,
@@ -231,13 +306,13 @@ CREATE TABLE IF NOT EXISTS people (
     slug TEXT
 );
 
--- 14. People Groups (Tribes/Nations)
+-- 12. People Groups (Tribes/Nations)
 CREATE TABLE IF NOT EXISTS groups (
     id TEXT PRIMARY KEY,
     name TEXT
 );
 
--- 15. Events (The Timeline)
+-- 13. Events (The Timeline)
 CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,
     title TEXT,
@@ -246,19 +321,19 @@ CREATE TABLE IF NOT EXISTS events (
     sort_key REAL
 );
 
--- 16. The "Relational" Verse Table
--- This is critical: Theographic uses its own IDs for verses. 
+-- 14. The "Relational" Verse Table
+-- This is critical: Theographic uses its own IDs for verses.
 -- We need this table to map 'rec7mkRL...' to 'Gen.1.1'
 CREATE TABLE IF NOT EXISTS verse_id_map (
     rec_id TEXT PRIMARY KEY,
     osis_ref TEXT
 );
 
--- 17. Multi-Way Junction Tables (The Connections)
+-- 15. Multi-Way Junction Tables (The Connections)
 CREATE TABLE IF NOT EXISTS event_participants (
     event_id TEXT,
     participant_id TEXT, -- Can be person_id or group_id
-    FOREIGN KEY(event_id) REFERENCES events(id)
+    PRIMARY KEY (event_id, participant_id)
 );
 
 CREATE TABLE IF NOT EXISTS group_memberships (
@@ -268,124 +343,45 @@ CREATE TABLE IF NOT EXISTS group_memberships (
     FOREIGN KEY(person_id) REFERENCES people(id)
 );
 
--- 18. Bridge: Events to Verses (rec... to rec...)
+-- 16. Bridge: Events to Verses (rec... to rec...)
 CREATE TABLE IF NOT EXISTS event_verses (
     event_id TEXT,
     verse_id TEXT, -- rec... ID
     PRIMARY KEY (event_id, verse_id)
 );
 
--- 19. Bridge: People to Verses (rec... to rec...)
+-- 17. Bridge: People to Verses (rec... to rec...)
 CREATE TABLE IF NOT EXISTS person_verses (
     person_id TEXT,
     verse_id TEXT, -- rec... ID
     PRIMARY KEY (person_id, verse_id)
 );
-
--- 20. Authentication Users
-CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    subject TEXT NOT NULL UNIQUE,
-    display_name TEXT,
-    role TEXT NOT NULL DEFAULT 'member',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS api_keys (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    token_hash TEXT NOT NULL UNIQUE,
-    label TEXT,
-    scopes TEXT NOT NULL DEFAULT 'read',
-    active INTEGER NOT NULL DEFAULT 1,
-    last_used_at DATETIME,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_api_keys_token_hash ON api_keys(token_hash);
-CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
-
-CREATE TABLE IF NOT EXISTS invite_codes (
-    id TEXT PRIMARY KEY,
-    code_hash TEXT NOT NULL UNIQUE,
-    label TEXT NOT NULL,
-    scopes TEXT NOT NULL DEFAULT 'read',
-    created_by_user_id TEXT NOT NULL,
-    consumed_by_user_id TEXT,
-    consumed_api_key_id TEXT,
-    consumed_at DATETIME,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(created_by_user_id) REFERENCES users(id),
-    FOREIGN KEY(consumed_by_user_id) REFERENCES users(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_invite_codes_code_hash ON invite_codes(code_hash);
-CREATE INDEX IF NOT EXISTS idx_invite_codes_created_by_user_id ON invite_codes(created_by_user_id);
     `
 
-	_, err := db.Exec(schema)
-	if err != nil {
-		log.Fatalf("Failed to create tables: %v", err)
+	if _, err := db.Exec(schema); err != nil {
+		return fmt.Errorf("create bible tables: %w", err)
 	}
 
-	ensureNotesOwnershipSchema(db)
+	return dropLegacyUserTables(db)
 }
 
-func ensureNotesOwnershipSchema(db *sql.DB) {
-	var columnExists bool
-	rows, err := db.Query("PRAGMA table_info(notes)")
-	if err != nil {
-		log.Printf("Failed to inspect notes table: %v", err)
-		return
-	}
-	defer rows.Close()
+// dropLegacyUserTables removes user data left in corpus files created before
+// accounts and notes moved to Postgres.
+//
+// A fresh corpus never has these tables — CreateBibleTables no longer defines
+// them — but a database seeded by an older build still carries the rows,
+// including API key and invite code hashes. Those would otherwise be baked into
+// every image built from that file. The authoritative copies now live in
+// Postgres, so the remnants here are dead weight and a needless disclosure.
+func dropLegacyUserTables(db *sql.DB) error {
+	// Order matters: note_verses references notes, api_keys/invite_codes
+	// reference users.
+	legacy := []string{"note_verses", "notes", "api_keys", "invite_codes", "users"}
 
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull int
-		var defaultValue sql.NullString
-		var pk int
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			log.Printf("Failed to scan notes schema: %v", err)
-			return
-		}
-		if name == "owner_user_id" {
-			columnExists = true
+	for _, table := range legacy {
+		if _, err := db.Exec("DROP TABLE IF EXISTS " + table); err != nil {
+			return fmt.Errorf("drop legacy table %s: %w", table, err)
 		}
 	}
-
-	if !columnExists {
-		if _, err := db.Exec("ALTER TABLE notes ADD COLUMN owner_user_id TEXT"); err != nil {
-			log.Printf("Failed to add owner_user_id to notes: %v", err)
-			return
-		}
-	}
-
-	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_notes_owner_user_id ON notes(owner_user_id)"); err != nil {
-		log.Printf("Failed to create notes owner index: %v", err)
-		return
-	}
-
-	var ownerCount int
-	if err := db.QueryRow("SELECT COUNT(1) FROM notes WHERE owner_user_id IS NOT NULL AND owner_user_id <> ''").Scan(&ownerCount); err != nil {
-		log.Printf("Failed to inspect existing note ownership: %v", err)
-		return
-	}
-	if ownerCount > 0 {
-		return
-	}
-
-	var defaultOwner string
-	if err := db.QueryRow("SELECT id FROM users ORDER BY created_at ASC LIMIT 1").Scan(&defaultOwner); err != nil {
-		log.Printf("No default note owner available for backfill: %v", err)
-		return
-	}
-
-	if _, err := db.Exec("UPDATE notes SET owner_user_id = ? WHERE owner_user_id IS NULL OR owner_user_id = ''", defaultOwner); err != nil {
-		log.Printf("Failed to backfill note ownership: %v", err)
-	}
+	return nil
 }

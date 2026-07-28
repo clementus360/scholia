@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -81,6 +82,10 @@ type Location struct {
 	CreditURL    string   `json:"credit_url"`
 	ImageAuthor  string   `json:"image_author"`
 	SourceInfo   string   `json:"source_info"`
+	// Geometry is a JSON object describing the map shape:
+	// { kind, land_or_water, boundary:[[lon,lat]...], label_line:[...], external_file }.
+	// Emitted as a nested object (not a string); omitted when absent.
+	Geometry json.RawMessage `json:"geometry,omitempty"`
 }
 
 type Person struct {
@@ -105,22 +110,6 @@ type Event struct {
 	StartDate string  `json:"start_date"`
 	Duration  string  `json:"duration"`
 	SortKey   float64 `json:"sort_key"`
-}
-
-type Note struct {
-	ID            int64    `json:"id"`
-	OwnerUserID   string   `json:"-"`
-	Title         string   `json:"title"`
-	MainReference string   `json:"main_reference"`
-	Content       string   `json:"content"`
-	VerseIDs      []string `json:"verse_ids,omitempty"`
-	CreatedAt     string   `json:"created_at,omitempty"`
-	UpdatedAt     string   `json:"updated_at,omitempty"`
-}
-
-type queryExecutor interface {
-	Exec(query string, args ...any) (sql.Result, error)
-	Query(query string, args ...any) (*sql.Rows, error)
 }
 
 func GetVerseByID(db *sql.DB, osisID string) (*Verse, error) {
@@ -347,12 +336,12 @@ func GetLocationByID(db *sql.DB, locationID string) (*Location, error) {
 	}
 
 	row := db.QueryRow(`
-		SELECT id, name, modern_name, latitude, longitude, feature_type, geometry_type, image_file, image_url, credit_url, image_author, source_info
+		SELECT id, name, modern_name, latitude, longitude, feature_type, geometry_type, image_file, image_url, credit_url, image_author, source_info, geometry
 		FROM locations WHERE id = ?`, canonicalID)
 
 	var location Location
 	var latitude, longitude sql.NullFloat64
-	var modernName, featureType, geometryType, imageFile, imageURL, creditURL, imageAuthor, sourceInfo sql.NullString
+	var modernName, featureType, geometryType, imageFile, imageURL, creditURL, imageAuthor, sourceInfo, geometry sql.NullString
 	if err := row.Scan(
 		&location.ID,
 		&location.Name,
@@ -366,6 +355,7 @@ func GetLocationByID(db *sql.DB, locationID string) (*Location, error) {
 		&creditURL,
 		&imageAuthor,
 		&sourceInfo,
+		&geometry,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -373,6 +363,9 @@ func GetLocationByID(db *sql.DB, locationID string) (*Location, error) {
 		return nil, err
 	}
 
+	if geometry.Valid && geometry.String != "" {
+		location.Geometry = json.RawMessage(geometry.String)
+	}
 	if modernName.Valid {
 		location.ModernName = modernName.String
 	}
@@ -418,7 +411,7 @@ func GetLocationsByVerseID(db *sql.DB, verseID string) ([]Location, error) {
 
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
 	query := fmt.Sprintf(`
-		SELECT l.id, l.name, l.modern_name, l.latitude, l.longitude, l.feature_type, l.geometry_type, l.image_file, l.image_url, l.credit_url, l.image_author, l.source_info
+		SELECT l.id, l.name, l.modern_name, l.latitude, l.longitude, l.feature_type, l.geometry_type, l.image_file, l.image_url, l.credit_url, l.image_author, l.source_info, l.geometry
 		FROM locations l
 		INNER JOIN verse_locations vl ON vl.location_id = l.id
 		WHERE vl.verse_id IN (%s)
@@ -439,7 +432,7 @@ func GetLocationsByVerseID(db *sql.DB, verseID string) ([]Location, error) {
 	for rows.Next() {
 		var location Location
 		var latitude, longitude sql.NullFloat64
-		var modernName, featureType, geometryType, imageFile, imageURL, creditURL, imageAuthor, sourceInfo sql.NullString
+		var modernName, featureType, geometryType, imageFile, imageURL, creditURL, imageAuthor, sourceInfo, geometry sql.NullString
 		if err := rows.Scan(
 			&location.ID,
 			&location.Name,
@@ -453,8 +446,12 @@ func GetLocationsByVerseID(db *sql.DB, verseID string) ([]Location, error) {
 			&creditURL,
 			&imageAuthor,
 			&sourceInfo,
+			&geometry,
 		); err != nil {
 			return nil, err
+		}
+		if geometry.Valid && geometry.String != "" {
+			location.Geometry = json.RawMessage(geometry.String)
 		}
 		if modernName.Valid {
 			location.ModernName = modernName.String
@@ -743,193 +740,6 @@ func GetCrossReferencesByVerseID(db *sql.DB, verseID string, limit, offset int) 
 		return nil, err
 	}
 	return refs, nil
-}
-
-func GetNotesByVerseID(db *sql.DB, ownerID, verseID string, limit, offset int) ([]Note, error) {
-	if strings.TrimSpace(ownerID) == "" {
-		return []Note{}, nil
-	}
-	rows, err := db.Query(`
-		SELECT n.id, n.owner_user_id, n.title, n.main_reference, n.content, n.created_at, n.updated_at
-		FROM notes n
-		INNER JOIN note_verses nv ON nv.note_id = n.id
-		WHERE nv.verse_id = ? AND n.owner_user_id = ?
-		ORDER BY n.updated_at DESC, n.id DESC LIMIT ? OFFSET ?`, verseID, ownerID, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	notes := make([]Note, 0)
-	for rows.Next() {
-		var note Note
-		if err := rows.Scan(&note.ID, &note.OwnerUserID, &note.Title, &note.MainReference, &note.Content, &note.CreatedAt, &note.UpdatedAt); err != nil {
-			return nil, err
-		}
-		notes = append(notes, note)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return notes, nil
-}
-
-func ListNotes(db *sql.DB, ownerID string, limit, offset int) ([]Note, error) {
-	if strings.TrimSpace(ownerID) == "" {
-		return []Note{}, nil
-	}
-	rows, err := db.Query(`SELECT id, owner_user_id, title, main_reference, content, created_at, updated_at FROM notes WHERE owner_user_id = ? ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`, ownerID, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	notes := make([]Note, 0)
-	for rows.Next() {
-		var note Note
-		if err := rows.Scan(&note.ID, &note.OwnerUserID, &note.Title, &note.MainReference, &note.Content, &note.CreatedAt, &note.UpdatedAt); err != nil {
-			return nil, err
-		}
-		notes = append(notes, note)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return notes, nil
-}
-
-func GetNoteByID(db *sql.DB, ownerID string, noteID int64) (*Note, error) {
-	if strings.TrimSpace(ownerID) == "" {
-		return nil, nil
-	}
-	note := &Note{}
-	err := db.QueryRow(`SELECT id, owner_user_id, title, main_reference, content, created_at, updated_at FROM notes WHERE id = ? AND owner_user_id = ?`, noteID, ownerID).Scan(
-		&note.ID, &note.OwnerUserID, &note.Title, &note.MainReference, &note.Content, &note.CreatedAt, &note.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	verseIDs, err := getNoteVerseIDs(db, note.ID)
-	if err != nil {
-		return nil, err
-	}
-	note.VerseIDs = verseIDs
-	return note, nil
-}
-
-func CreateNote(db *sql.DB, note *Note) (int64, error) {
-	tx, err := db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-
-	result, err := tx.Exec(`INSERT INTO notes (owner_user_id, title, main_reference, content) VALUES (?, ?, ?, ?)`, note.OwnerUserID, note.Title, note.MainReference, note.Content)
-	if err != nil {
-		return 0, err
-	}
-	noteID, err := result.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	if err := replaceNoteVerses(tx, noteID, note.VerseIDs); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return noteID, nil
-}
-
-func UpdateNote(db *sql.DB, ownerID string, note *Note) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	result, err := tx.Exec(`UPDATE notes SET title = ?, main_reference = ?, content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_user_id = ?`,
-		note.Title, note.MainReference, note.Content, note.ID, ownerID)
-	if err != nil {
-		return err
-	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
-	}
-	if err := replaceNoteVerses(tx, note.ID, note.VerseIDs); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func DeleteNote(db *sql.DB, ownerID string, noteID int64) error {
-	if strings.TrimSpace(ownerID) == "" {
-		return sql.ErrNoRows
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec("DELETE FROM note_verses WHERE note_id = ?", noteID); err != nil {
-		return err
-	}
-	result, err := tx.Exec("DELETE FROM notes WHERE id = ? AND owner_user_id = ?", noteID, ownerID)
-	if err != nil {
-		return err
-	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
-	}
-	return tx.Commit()
-}
-
-func getNoteVerseIDs(db queryExecutor, noteID int64) ([]string, error) {
-	rows, err := db.Query(`SELECT verse_id FROM note_verses WHERE note_id = ? ORDER BY verse_id ASC`, noteID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	verseIDs := make([]string, 0)
-	for rows.Next() {
-		var verseID string
-		if err := rows.Scan(&verseID); err != nil {
-			return nil, err
-		}
-		verseIDs = append(verseIDs, verseID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return verseIDs, nil
-}
-
-func replaceNoteVerses(db queryExecutor, noteID int64, verseIDs []string) error {
-	if _, err := db.Exec("DELETE FROM note_verses WHERE note_id = ?", noteID); err != nil {
-		return err
-	}
-	for _, verseID := range verseIDs {
-		if verseID == "" {
-			continue
-		}
-		if _, err := db.Exec("INSERT OR IGNORE INTO note_verses (note_id, verse_id) VALUES (?, ?)", noteID, verseID); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func getVerseLookupKeys(db *sql.DB, verseID string) ([]string, error) {
