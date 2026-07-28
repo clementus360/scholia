@@ -99,17 +99,33 @@ No backend change is needed for any of them.
 ## 5. Run
 
 ```bash
-go run ./cmd/seed   # builds data/bible.db, ~10s
 go run ./cmd/api
 ```
 
-In production the corpus is generated inside the Docker build and baked into the
-image, so no volume is needed:
+The corpus is built automatically on first start if `data/bible.db` is missing —
+about ten seconds, before the listener opens. Run `go run ./cmd/seed` explicitly
+when you want to rebuild it after changing the source data or the schema.
+
+### Deploying
+
+Two supported shapes:
+
+**Docker** (preferred). The corpus is generated during the build and baked into
+the image, so start-up is immediate and no volume is needed:
 
 ```bash
 docker build -t scholia-api .
 docker run --rm -p 8080:8080 --env-file .env scholia-api
 ```
+
+**Source-based platforms** (Render, Railway, Fly's Go buildpack). These deploy
+the repo without running the Dockerfile, so no corpus ships. The API notices and
+builds one on boot from the committed `data/` directory. Nothing to configure —
+but every new instance pays the ~10s build, because the filesystem is ephemeral
+and nothing persists between deploys.
+
+If you would rather fail fast than build at boot — say the image is supposed to
+contain a corpus already — set `SCHOLIA_AUTO_SEED=false`.
 
 ---
 
