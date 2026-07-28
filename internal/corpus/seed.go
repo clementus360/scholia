@@ -497,11 +497,18 @@ func seedAmalgamated(db *sql.DB, folderPath string) {
 		rows.Close()
 	}
 
-	tx, _ := db.Begin()
-	stmt, _ := tx.Prepare(`
+	// The insert is issued against the batcher's current transaction rather than
+	// a prepared statement, because a statement is bound to the transaction that
+	// created it and would be invalidated every time the batch rotates.
+	const insertAnalysis = `
         INSERT OR REPLACE INTO verse_analysis
         (verse_id, word_order, surface_word, english_gloss, strongs_id, morph_code, manuscript_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+	batch, err := newBatcher(db)
+	if err != nil {
+		log.Fatalf("Failed to start analysis batch: %v", err)
+	}
 
 	totalWords := 0
 	droppedNoVerse := 0
@@ -581,13 +588,21 @@ func seedAmalgamated(db *sql.DB, folderPath string) {
 				droppedNoVerse++
 				continue
 			}
-			if _, err := stmt.Exec(verseID, wordOrder, surfaceWord, gloss, strongsID, morphCode, mType); err == nil {
+			if _, err := batch.Tx().Exec(insertAnalysis, verseID, wordOrder, surfaceWord, gloss, strongsID, morphCode, mType); err == nil {
 				totalWords++
 			}
+			if err := batch.Step(); err != nil {
+				log.Fatalf("Failed to commit analysis batch: %v", err)
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("⚠️ Error reading %s: %v", fileName, err)
 		}
 		file.Close()
 	}
-	tx.Commit()
+	if err := batch.Done(); err != nil {
+		log.Fatalf("Failed to finish analysis: %v", err)
+	}
 	fmt.Printf("✅ Analysis seeded: %d tokens (%d skipped: no matching BSB verse).\n", totalWords, droppedNoVerse)
 }
 
@@ -1370,12 +1385,16 @@ func seedFile(path string, processor func(string, map[string]interface{})) {
 }
 
 func SeedCrossReferences(db *sql.DB, filePath string) {
-	tx, _ := db.Begin()
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Fatalf("Failed to open cross refs: %v", err)
 	}
 	defer file.Close()
+
+	batch, err := newBatcher(db)
+	if err != nil {
+		log.Fatalf("Failed to start cross-reference batch: %v", err)
+	}
 
 	scanner := bufio.NewScanner(file)
 	// Skip header line if it exists
@@ -1393,14 +1412,22 @@ func SeedCrossReferences(db *sql.DB, filePath string) {
 		// and expand ranges so all 66 books survive the from/to verse FKs.
 		for _, from := range expandRefRange(parts[0]) {
 			for _, to := range expandRefRange(parts[1]) {
-				if res, err := tx.Exec("INSERT OR IGNORE INTO cross_references (from_verse, to_verse) VALUES (?, ?)", from, to); err == nil {
+				if res, err := batch.Tx().Exec("INSERT OR IGNORE INTO cross_references (from_verse, to_verse) VALUES (?, ?)", from, to); err == nil {
 					if n, _ := res.RowsAffected(); n > 0 {
 						inserted++
 					}
 				}
+				if err := batch.Step(); err != nil {
+					log.Fatalf("Failed to commit cross-reference batch: %v", err)
+				}
 			}
 		}
 	}
-	tx.Commit()
+	if err := scanner.Err(); err != nil {
+		log.Fatalf("Failed reading cross refs: %v", err)
+	}
+	if err := batch.Done(); err != nil {
+		log.Fatalf("Failed to finish cross-references: %v", err)
+	}
 	fmt.Printf("✅ Cross-references seeded: %d links.\n", inserted)
 }

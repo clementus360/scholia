@@ -7,8 +7,16 @@ import (
 	"os"
 	"path/filepath"
 
-	// CGO-free driver and embedded SQLite for macOS/ARM64 compatibility
-	_ "github.com/ncruces/go-sqlite3/driver"
+	// CGO-free driver with SQLite embedded as WebAssembly.
+	sqlitedriver "github.com/ncruces/go-sqlite3/driver"
+
+	// FTS5 is an opt-in extension and must be registered per connection. The
+	// verse search index is an FTS5 virtual table, so without this every open
+	// fails with "no such module: fts5".
+	"github.com/ncruces/go-sqlite3/ext/fts5"
+
+	// Required by the driver: provides the OS filesystem VFS.
+	_ "github.com/ncruces/go-sqlite3/vfs"
 )
 
 type Verse struct {
@@ -98,7 +106,7 @@ func OpenBibleDB(path string) (*sql.DB, error) {
 	// absolute paths on some platforms contain characters that are otherwise
 	// significant in a URI.
 	dsn := "file:" + url.PathEscape(path) + "?mode=ro"
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sqlitedriver.Open(dsn, fts5.Register)
 	if err != nil {
 		return nil, fmt.Errorf("open bible database: %w", err)
 	}
@@ -119,7 +127,7 @@ func OpenBibleDB(path string) (*sql.DB, error) {
 // OpenBibleDBForSeed opens the corpus read-write for cmd/seed. WAL is enabled
 // here purely for bulk-insert throughput; FinalizeBibleDB undoes it afterwards.
 func OpenBibleDBForSeed(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", path)
+	db, err := sqlitedriver.Open(path, fts5.Register)
 	if err != nil {
 		return nil, fmt.Errorf("open bible database for seeding: %w", err)
 	}
@@ -131,6 +139,26 @@ func OpenBibleDBForSeed(path string) (*sql.DB, error) {
 	if _, err := db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
+	}
+
+	// Give SQLite a memory ceiling.
+	//
+	// This driver runs SQLite compiled to WebAssembly, so its allocations live
+	// in the wazero module's linear memory, not the Go heap. Measured on a full
+	// seed: Go heap stays around 3MB while resident memory reaches ~228MB. That
+	// means GOGC and GOMEMLIMIT have no influence here whatsoever — a fact worth
+	// recording, because tuning them is the obvious first instinct and it is
+	// wasted effort.
+	//
+	// soft_heap_limit asks SQLite to reclaim rather than grow once it passes the
+	// threshold. It showed no measurable effect on a machine with memory to
+	// spare, which is expected — it is a relief valve for when memory is tight,
+	// not an optimisation. It is set defensively and has not been proven to fix
+	// any specific failure.
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA soft_heap_limit=%d;",
+		envInt("SCHOLIA_SEED_HEAP_LIMIT_BYTES", 64<<20))); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set soft heap limit: %w", err)
 	}
 
 	return db, nil

@@ -29,14 +29,24 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/api ./cmd/api
 # its first minutes seeding, which on a small instance can exceed a platform's
 # port-detection timeout and fail the deploy.
 #
-# Compiled separately from `go run` so the toolchain's memory is released
-# before seeding starts, and run under a soft memory limit so the Go collector
-# works harder instead of growing the heap. A full seed peaks around 250MB of
-# live data; 512MB leaves headroom without letting it balloon on a constrained
-# builder. Raise GOMEMLIMIT if your builder has plenty of RAM and you would
-# rather have the speed.
+# Compiled separately from `go run` so the toolchain has exited before seeding
+# starts.
+#
+# Deliberately no GOMEMLIMIT/GOGC tuning: the SQLite driver is WebAssembly, its
+# memory lives in the wazero module rather than the Go heap, and the Go heap
+# measures ~3MB against ~228MB resident. Those knobs do nothing here.
+#
+# On failure the head of the log is printed. A Go fatal error emits a full
+# goroutine dump, and the cause is the FIRST line — build output is usually
+# truncated from the front, leaving only GC worker frames that say nothing about
+# what went wrong.
 RUN go build -o /out/seed ./cmd/seed \
-    && GOMEMLIMIT=512MiB GOGC=50 /out/seed
+    && { /out/seed > /tmp/seed.log 2>&1 \
+         || { echo "=== SEED FAILED — first 40 lines of output ==="; \
+              head -n 40 /tmp/seed.log; \
+              echo "=== (tail) ==="; tail -n 5 /tmp/seed.log; \
+              exit 1; }; } \
+    && tail -n 3 /tmp/seed.log
 
 # Fail the build rather than shipping a corpus the API will refuse to open.
 # cmd/seed checkpoints and leaves rollback-journal mode; a surviving -wal or
