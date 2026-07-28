@@ -18,6 +18,7 @@ var defaultCORSOrigins = []string{
 	"http://127.0.0.1:8080",
 	"https://scholia-web-coral.vercel.app",
 	"https://scholia.ishimwe.dev",
+	"https://bible.ishimwe.dev",
 }
 
 func CORS(allowedOrigins []string) func(http.Handler) http.Handler {

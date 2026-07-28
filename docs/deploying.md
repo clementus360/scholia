@@ -88,8 +88,18 @@ built into the image nor buildable at boot. On Docker, the build stage did not
 run (wrong runtime selected). On the native runtime, check `SCHOLIA_AUTO_SEED`
 is not set to false.
 
-**`connect to postgres: ... no route to host` / IPv6 errors** — the DSN uses
-`db.<ref>.supabase.co`, which is IPv6-only. Switch to the session pooler.
+**`connect to postgres: ... network is unreachable`** — the DSN uses
+`db.<ref>.supabase.co`, which has no A record and is reachable over IPv6 only.
+Render cannot route to it. Switch to the session pooler:
+
+```
+postgresql://postgres.<project-ref>:<url-encoded-pw>@aws-0-<region>.pooler.supabase.com:5432/postgres
+```
+
+Two details that bite: the username becomes `postgres.<project-ref>` rather than
+plain `postgres`, and the region in the hostname is the *database's* region,
+which need not match where you host the API. If you do not know it, try
+connecting to a few — only the correct one accepts the credentials.
 
 **`DATABASE_URL points at the Supabase transaction pooler (:6543)`** — append
 `?default_query_exec_mode=simple_protocol`, or use the session pooler instead.
