@@ -85,6 +85,79 @@ func GetNotesByVerseID(ctx context.Context, db *sql.DB, ownerID, verseID string,
 	return collectNotes(rows)
 }
 
+// GetNotesForVerseIDs returns the caller's notes for many verses in one query,
+// keyed by verse id.
+//
+// The range context endpoint previously called GetNotesByVerseID once per
+// verse. Against SQLite that was merely wasteful; against Postgres it is a
+// network round trip each time, so a twenty-verse range cost twenty of them —
+// around half a second before any work is done.
+//
+// Callers must preserve their own ordering by walking their verse list and
+// looking each id up here. Within a verse, notes keep the same
+// updated_at DESC, id DESC order the per-verse query used.
+func GetNotesForVerseIDs(ctx context.Context, db *sql.DB, ownerID string, verseIDs []string) (map[string][]Note, error) {
+	result := map[string][]Note{}
+	if strings.TrimSpace(ownerID) == "" || len(verseIDs) == 0 {
+		return result, nil
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT nv.verse_id, n.id, n.owner_user_id::text, n.title, n.main_reference,
+		       n.content, n.created_at, n.updated_at
+		FROM notes n
+		INNER JOIN note_verses nv ON nv.note_id = n.id
+		WHERE n.owner_user_id = $1::uuid AND nv.verse_id = ANY($2)
+		ORDER BY n.updated_at DESC, n.id DESC`, ownerID, pqTextArray(verseIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			verseID string
+			note    Note
+		)
+		if err := rows.Scan(
+			&verseID, &note.ID, &note.OwnerUserID, &note.Title, &note.MainReference,
+			&note.Content, &note.CreatedAt, &note.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		result[verseID] = append(result[verseID], note)
+	}
+	return result, rows.Err()
+}
+
+// pqTextArray renders a Go slice as a Postgres text[] literal.
+//
+// database/sql has no array type, and how a driver encodes []string is
+// driver-specific. Building the literal here keeps the behaviour identical
+// regardless of driver, matching the array_to_string approach used elsewhere.
+func pqTextArray(values []string) string {
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, v := range values {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		// Quote every element and escape backslashes and quotes. Verse ids are
+		// generated internally, but quoting unconditionally keeps this correct
+		// if that ever stops being true.
+		b.WriteByte('"')
+		for _, r := range v {
+			if r == '"' || r == '\\' {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(r)
+		}
+		b.WriteByte('"')
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
 func ListNotes(ctx context.Context, db *sql.DB, ownerID string, limit, offset int) ([]Note, error) {
 	if strings.TrimSpace(ownerID) == "" {
 		return []Note{}, nil

@@ -105,17 +105,40 @@ func main() {
 // cold start on such a platform is that much slower. Set
 // SCHOLIA_AUTO_SEED=false to disable and require a prebuilt corpus.
 func ensureCorpus(dbPath string) error {
-	if _, err := os.Stat(dbPath); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
+	reason := ""
+
+	switch _, err := os.Stat(dbPath); {
+	case err == nil:
+		// Present, but it may predate the current schema. An index added to
+		// CreateBibleTables does not appear in a corpus built earlier, and the
+		// only symptom is that the API is mysteriously slow — so treat a stale
+		// corpus exactly like a missing one.
+		if err := storage.CheckCorpusVersion(dbPath); err != nil {
+			if !errors.Is(err, storage.ErrCorpusOutdated) {
+				return err
+			}
+			reason = err.Error()
+		} else {
+			return nil
+		}
+	case os.IsNotExist(err):
+		reason = fmt.Sprintf("no corpus at %s", dbPath)
+	default:
 		return fmt.Errorf("stat corpus at %s: %w", dbPath, err)
 	}
 
 	if disabled := strings.TrimSpace(os.Getenv("SCHOLIA_AUTO_SEED")); disabled != "" {
 		if enabled, err := strconv.ParseBool(disabled); err == nil && !enabled {
 			return fmt.Errorf(
-				"no corpus at %s and SCHOLIA_AUTO_SEED is disabled: build it with `go run ./cmd/seed`", dbPath)
+				"%s, and SCHOLIA_AUTO_SEED is disabled. In a container this means the image was built "+
+					"without an up-to-date corpus — rebuild the image so the seed stage runs again", reason)
 		}
+	}
+
+	log.Printf("Corpus needs rebuilding: %s", reason)
+
+	if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale corpus: %w", err)
 	}
 
 	dataDir, err := corpus.ResolveDataDir()
@@ -123,7 +146,7 @@ func ensureCorpus(dbPath string) error {
 		return fmt.Errorf("no corpus at %s and cannot build one: %w", dbPath, err)
 	}
 
-	log.Printf("No corpus at %s — building it from %s (this takes ~10s)...", dbPath, dataDir)
+	log.Printf("Building corpus at %s from %s (this takes ~10s)...", dbPath, dataDir)
 	started := time.Now()
 	if err := corpus.Build(dbPath, dataDir); err != nil {
 		return fmt.Errorf("build corpus: %w", err)

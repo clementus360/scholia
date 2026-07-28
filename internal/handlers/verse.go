@@ -224,6 +224,20 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 	notesByID := map[int64]storage.Note{}
 	notesOrdered := make([]storage.Note, 0)
 
+	// Fetched once for the whole range rather than once per verse. Notes live in
+	// Postgres, so the per-verse version cost a network round trip for every
+	// verse in the range. The loop below still walks verses in order and dedupes
+	// as it goes, so the resulting order is unchanged.
+	verseIDs := make([]string, 0, len(rangeResult.Verses))
+	for _, verse := range rangeResult.Verses {
+		verseIDs = append(verseIDs, verse.ID)
+	}
+	notesByVerse, err := storage.GetNotesForVerseIDs(r.Context(), h.users, ownerID, verseIDs)
+	if err != nil {
+		httputil.Error(w, fmt.Sprintf("Database error (notes): %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	for _, verse := range rangeResult.Verses {
 		analysis, err := storage.GetVerseAnalysisByVerseID(h.bible, verse.ID)
 		if err != nil {
@@ -287,12 +301,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			crossReferences = append(crossReferences, ref)
 		}
 
-		noteItems, err := storage.GetNotesByVerseID(r.Context(), h.users, ownerID, verse.ID, 1000, 0)
-		if err != nil {
-			httputil.Error(w, fmt.Sprintf("Database error (notes): %v", err), http.StatusInternalServerError)
-			return
-		}
-		for _, note := range noteItems {
+		for _, note := range notesByVerse[verse.ID] {
 			if _, exists := notesByID[note.ID]; exists {
 				continue
 			}

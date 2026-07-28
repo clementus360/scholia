@@ -2,10 +2,12 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	// CGO-free driver with SQLite embedded as WebAssembly.
 	sqlitedriver "github.com/ncruces/go-sqlite3/driver"
@@ -384,13 +386,82 @@ CREATE TABLE IF NOT EXISTS person_verses (
     verse_id TEXT, -- rec... ID
     PRIMARY KEY (person_id, verse_id)
 );
+
+-- 18. Reverse-lookup indexes for the verse context endpoint.
+--
+-- Every table below is queried BY VERSE, but each one's primary key leads with
+-- the other column, so the implicit index cannot serve these lookups. Without
+-- them SQLite falls back to full scans — 606,790 rows of cross_references for
+-- every single verse — which made /verse/{id}/context take 206ms for one verse
+-- and four seconds for a twenty-verse range. With them the same range takes
+-- ~80ms.
+--
+-- Measured before adding any of these: the query planner reported
+-- "SCAN cross_references", "SCAN pv", "SCAN ev".
+CREATE INDEX IF NOT EXISTS idx_cross_references_from ON cross_references(from_verse);
+CREATE INDEX IF NOT EXISTS idx_person_verses_verse   ON person_verses(verse_id);
+CREATE INDEX IF NOT EXISTS idx_event_verses_verse    ON event_verses(verse_id);
+
+-- verse_id_map translates Theographic record ids to OSIS refs. Its primary key
+-- is rec_id, but the people/groups/events lookups all start from an OSIS ref.
+CREATE INDEX IF NOT EXISTS idx_verse_id_map_osis     ON verse_id_map(osis_ref);
+
+-- 19. Build metadata, so a corpus produced by an older schema can be detected
+-- rather than silently served with missing indexes.
+CREATE TABLE IF NOT EXISTS corpus_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
     `
 
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("create bible tables: %w", err)
 	}
 
+	if _, err := db.Exec(
+		`INSERT OR REPLACE INTO corpus_meta (key, value) VALUES ('schema_version', ?)`,
+		strconv.Itoa(CorpusSchemaVersion),
+	); err != nil {
+		return fmt.Errorf("record corpus schema version: %w", err)
+	}
+
 	return dropLegacyUserTables(db)
+}
+
+// CorpusSchemaVersion identifies the shape of the generated corpus.
+//
+// Bump this whenever the schema changes in a way that requires a rebuild —
+// notably when adding an index, since an existing corpus will not gain one on
+// its own. The API compares this against the value recorded in the file and
+// refuses to serve, or rebuilds, on a mismatch. Without that check a deploy
+// that failed to reseed would come up looking healthy and just be slow.
+const CorpusSchemaVersion = 2
+
+// ErrCorpusOutdated reports a corpus built by an older schema version.
+var ErrCorpusOutdated = errors.New("corpus was built by an older schema version")
+
+// CheckCorpusVersion verifies the corpus at path matches CorpusSchemaVersion.
+// A corpus predating the version marker reports version 0.
+func CheckCorpusVersion(path string) error {
+	db, err := OpenBibleDB(path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	var recorded int
+	err = db.QueryRow(`SELECT value FROM corpus_meta WHERE key = 'schema_version'`).Scan(&recorded)
+	if err != nil && err != sql.ErrNoRows {
+		// A corpus old enough to lack corpus_meta entirely fails here with "no
+		// such table", which is itself the answer.
+		recorded = 0
+	}
+
+	if recorded != CorpusSchemaVersion {
+		return fmt.Errorf("%w: found version %d, expected %d — rebuild it with `go run ./cmd/seed`",
+			ErrCorpusOutdated, recorded, CorpusSchemaVersion)
+	}
+	return nil
 }
 
 // dropLegacyUserTables removes user data left in corpus files created before
