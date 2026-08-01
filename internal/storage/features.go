@@ -859,6 +859,28 @@ func getVerseByBookChapterVerse(db *sql.DB, book string, chapter, verseNum int) 
 
 var humanVersePattern = regexp.MustCompile(`(?i)^(.+?)\s+(\d+):(\d+)$`)
 
+// bookAndNumberPattern matches "Jude 3" — a book followed by a bare number.
+var bookAndNumberPattern = regexp.MustCompile(`(?i)^(.+?)\s+(\d+)$`)
+
+// singleChapterBooks hold one chapter, and are conventionally cited without it:
+// "Jude 3" means Jude 1:3, and almost nobody writes "Jude 1:3". Resolution used
+// to reject those citations outright, so they silently produced no verse.
+//
+// A fixed set rather than a lookup, because the canon does not change. Keyed by
+// the full book name resolveBookName returns, upper-cased.
+var singleChapterBooks = map[string]struct{}{
+	"OBADIAH":  {},
+	"PHILEMON": {},
+	"2 JOHN":   {},
+	"3 JOHN":   {},
+	"JUDE":     {},
+}
+
+func isSingleChapterBook(book string) bool {
+	_, ok := singleChapterBooks[strings.ToUpper(strings.TrimSpace(book))]
+	return ok
+}
+
 func parseVerseToken(token string, defaultBook string, defaultChapter int) (string, int, int, bool) {
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -880,6 +902,17 @@ func parseVerseToken(token string, defaultBook string, defaultChapter int) (stri
 			return "", 0, 0, false
 		}
 		return book, chapter, verseNum, true
+	}
+
+	// "Jude 3" / "Obadiah 5": a bare number after a single-chapter book is a
+	// verse in its only chapter. Multi-chapter books are left alone, because
+	// there the same shape means a whole chapter, which is a different request.
+	if match := bookAndNumberPattern.FindStringSubmatch(token); len(match) == 3 {
+		if book := resolveBookName(match[1]); book != "" && isSingleChapterBook(book) {
+			if verseNum, err := strconv.Atoi(match[2]); err == nil {
+				return book, 1, verseNum, true
+			}
+		}
 	}
 
 	if defaultBook != "" && defaultChapter > 0 {
@@ -909,6 +942,14 @@ type dotVerseToken struct {
 
 func parseDotVerseToken(token string) *dotVerseToken {
 	parts := strings.Split(token, ".")
+	// "JUD.3" — the dotted form of a single-chapter citation.
+	if len(parts) == 2 {
+		if book := resolveBookName(parts[0]); book != "" && isSingleChapterBook(book) {
+			if verseNum, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+				return &dotVerseToken{book: book, chapter: 1, verse: verseNum}
+			}
+		}
+	}
 	if len(parts) == 3 {
 		chapter, err1 := strconv.Atoi(strings.TrimSpace(parts[1]))
 		verseNum, err2 := strconv.Atoi(strings.TrimSpace(parts[2]))
@@ -928,6 +969,28 @@ func parseDotVerseToken(token string) *dotVerseToken {
 	return nil
 }
 
+// bookCodeAliases maps book codes other tools use onto the codes this corpus
+// actually stores.
+//
+// The Johannine letters are the case that mattered: USFM — and this project's
+// own frontend — call them 1JN/2JN/3JN, while the corpus follows the BSB source
+// names and stores 1JO/2JO/3JO. A request for 1JN.1.1 resolved to nothing at
+// all, so 1 John simply never appeared.
+//
+// Every code resolution goes through this one map. It previously existed as two
+// separate inline maps, one per resolution path, which is how the two drifted.
+var bookCodeAliases = map[string]string{
+	"1JN":    "1JO",
+	"2JN":    "2JO",
+	"3JN":    "3JO",
+	"1KGS":   "1KI",
+	"2KGS":   "2KI",
+	"1CHRON": "1CH",
+	"2CHRON": "2CH",
+	"PS":     "PSA",
+	"MATT":   "MAT",
+}
+
 func resolveBookName(token string) string {
 	token = strings.ToUpper(strings.TrimSpace(token))
 	if token == "" {
@@ -935,6 +998,21 @@ func resolveBookName(token string) string {
 	}
 
 	compact := strings.ReplaceAll(token, " ", "")
+
+	// A code alias resolves straight to the corpus's own code.
+	for _, candidate := range []string{token, compact} {
+		mapped, ok := bookCodeAliases[candidate]
+		if !ok {
+			continue
+		}
+		if fullName, ok := verseBookNames[mapped]; ok {
+			return fullName
+		}
+		if name, ok := bsbCodeToTheoBook[mapped]; ok {
+			return name
+		}
+	}
+
 	alias := map[string]string{
 		"PSALM":         "PSA",
 		"PSALMS":        "PSA",
@@ -998,10 +1076,7 @@ func normalizeToBSBVerseID(input string) (string, bool) {
 		return "", false
 	}
 
-	alias := map[string]string{
-		"1KGS": "1KI", "2KGS": "2KI", "1CHRON": "1CH", "2CHRON": "2CH", "PS": "PSA", "MATT": "MAT",
-	}
-	if mapped, ok := alias[bookToken]; ok {
+	if mapped, ok := bookCodeAliases[bookToken]; ok {
 		bookToken = mapped
 	}
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 func resolveCanonicalLocationID(db *sql.DB, locationID string) (string, error) {
@@ -88,15 +89,27 @@ type Location struct {
 	Geometry json.RawMessage `json:"geometry,omitempty"`
 }
 
+// PersonRelation is one tie in the family graph, already resolved to a name so
+// the caller does not have to fetch every relative separately.
+type PersonRelation struct {
+	Relation string `json:"relation"` // father | mother | child | sibling | partner
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+}
+
 type Person struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	LookupName     string `json:"lookup_name"`
-	Gender         string `json:"gender"`
-	BirthYear      int    `json:"birth_year"`
-	DeathYear      int    `json:"death_year"`
-	DictionaryText string `json:"dictionary_text"`
-	Slug           string `json:"slug"`
+	ID             string           `json:"id"`
+	Name           string           `json:"name"`
+	LookupName     string           `json:"lookup_name"`
+	Gender         string           `json:"gender"`
+	BirthYear      int              `json:"birth_year"`
+	DeathYear      int              `json:"death_year"`
+	DictionaryText string           `json:"dictionary_text"`
+	Slug           string           `json:"slug"`
+	AlsoCalled     string           `json:"also_called,omitempty"`
+	BirthPlace     string           `json:"birth_place,omitempty"`
+	DeathPlace     string           `json:"death_place,omitempty"`
+	Relations      []PersonRelation `json:"relations,omitempty"`
 }
 
 type Group struct {
@@ -104,12 +117,117 @@ type Group struct {
 	Name string `json:"name"`
 }
 
+// EventRef names a neighbouring event without pulling its whole record.
+type EventRef struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// EventPlace is where an event happened.
+type EventPlace struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 type Event struct {
-	ID        string  `json:"id"`
-	Title     string  `json:"title"`
-	StartDate string  `json:"start_date"`
-	Duration  string  `json:"duration"`
-	SortKey   float64 `json:"sort_key"`
+	ID        string       `json:"id"`
+	Title     string       `json:"title"`
+	StartDate string       `json:"start_date"`
+	Duration  string       `json:"duration"`
+	SortKey   float64      `json:"sort_key"`
+	Notes     string       `json:"notes,omitempty"`
+	PartOf    *EventRef    `json:"part_of,omitempty"`
+	Follows   *EventRef    `json:"follows,omitempty"`
+	Locations []EventPlace `json:"locations,omitempty"`
+}
+
+// Era is one band of the traditional chronology a verse falls into.
+type Era struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	StartYear int    `json:"start_year"`
+	EndYear   int    `json:"end_year"`
+	Summary   string `json:"summary"`
+}
+
+// BookSetting is the historical framing of the book a verse sits in.
+type BookSetting struct {
+	Name         string   `json:"name"`
+	Division     string   `json:"division,omitempty"`
+	Testament    string   `json:"testament,omitempty"`
+	YearWritten  string   `json:"year_written,omitempty"`
+	PlaceWritten string   `json:"place_written,omitempty"`
+	Writers      []string `json:"writers,omitempty"`
+}
+
+// VerseSetting answers "when and where am I" for a single verse. Every field is
+// optional: the dataset dates about 90% of verses and names a writing place for
+// only a handful of books.
+type VerseSetting struct {
+	YearNum *int         `json:"year_num,omitempty"`
+	Era     *Era         `json:"era,omitempty"`
+	Book    *BookSetting `json:"book,omitempty"`
+	// "verse" when the era comes from this verse's own year, "book" when the
+	// verse is undated and the era was inferred from the rest of its book.
+	EraSource string `json:"era_source,omitempty"`
+}
+
+// WorldRuler is a foreign ruler in office during the passage's era.
+type WorldRuler struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Title     string `json:"title"`
+	Region    string `json:"region"`
+	StartYear *int   `json:"start_year,omitempty"`
+	EndYear   *int   `json:"end_year,omitempty"`
+	Note      string `json:"note,omitempty"`
+	// True when the passage's own year falls inside this reign. Only set where
+	// the two chronologies agree — see GetWorldContext.
+	Current bool `json:"current"`
+}
+
+// WorldEvent is something happening elsewhere in the same era.
+type WorldEvent struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Region  string `json:"region"`
+	Year    *int   `json:"year,omitempty"`
+	Summary string `json:"summary,omitempty"`
+	// True when the event falls within 25 years of the passage, on the same
+	// chronology-agreement rule as WorldRuler.Current.
+	Nearby bool `json:"nearby"`
+}
+
+// EraBackground is a short written piece on one region during one era.
+type EraBackground struct {
+	ID     string `json:"id"`
+	Region string `json:"region"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+}
+
+// WorldContext is the world outside the passage: who was ruling the
+// surrounding powers, what was happening in them, and the background to it.
+type WorldContext struct {
+	EraID   string `json:"era_id"`
+	EraName string `json:"era_name"`
+	// True when the passage's year can be compared with these dates directly.
+	// False for the Old Testament, where the corpus uses a traditional
+	// chronology and these dates use the conventional one.
+	YearAligned bool            `json:"year_aligned"`
+	Rulers      []WorldRuler    `json:"rulers"`
+	Events      []WorldEvent    `json:"events"`
+	Backgrounds []EraBackground `json:"backgrounds"`
+}
+
+// DictionaryArticle is one public-domain reference article attached to a verse
+// through the people and places it mentions.
+type DictionaryArticle struct {
+	ID     string `json:"id"`
+	Term   string `json:"term"`
+	Body   string `json:"body"`
+	Source string `json:"source"`
+	Kind   string `json:"kind"` // person | place
 }
 
 func GetVerseByID(db *sql.DB, osisID string) (*Verse, error) {
@@ -557,9 +675,12 @@ func GetPeopleByVerseID(db *sql.DB, verseID string) ([]Person, error) {
 
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
 	query := fmt.Sprintf(`
-		SELECT p.id, p.name, p.lookup_name, p.gender, p.birth_year, p.death_year, p.dictionary_text, p.slug
+		SELECT p.id, p.name, p.lookup_name, p.gender, p.birth_year, p.death_year, p.dictionary_text, p.slug,
+		       COALESCE(p.also_called, ''), COALESCE(bp.name, ''), COALESCE(dp.name, '')
 		FROM people p
 		INNER JOIN person_verses pv ON pv.person_id = p.id
+		LEFT JOIN locations bp ON bp.id = p.birth_place_id
+		LEFT JOIN locations dp ON dp.id = p.death_place_id
 		WHERE pv.verse_id IN (%s)
 		ORDER BY p.name ASC`, placeholders)
 
@@ -577,7 +698,8 @@ func GetPeopleByVerseID(db *sql.DB, verseID string) ([]Person, error) {
 	people := make([]Person, 0)
 	for rows.Next() {
 		var person Person
-		if err := rows.Scan(&person.ID, &person.Name, &person.LookupName, &person.Gender, &person.BirthYear, &person.DeathYear, &person.DictionaryText, &person.Slug); err != nil {
+		if err := rows.Scan(&person.ID, &person.Name, &person.LookupName, &person.Gender, &person.BirthYear, &person.DeathYear, &person.DictionaryText, &person.Slug,
+			&person.AlsoCalled, &person.BirthPlace, &person.DeathPlace); err != nil {
 			return nil, err
 		}
 		people = append(people, person)
@@ -585,22 +707,78 @@ func GetPeopleByVerseID(db *sql.DB, verseID string) ([]Person, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+
+	if err := attachPersonRelations(db, people); err != nil {
+		return nil, err
+	}
 	return people, nil
+}
+
+// attachPersonRelations fills in the family graph for people already loaded.
+// One query for the whole set rather than one per person: a verse can mention a
+// dozen people, and each of those can have a dozen relatives.
+func attachPersonRelations(db *sql.DB, people []Person) error {
+	if len(people) == 0 {
+		return nil
+	}
+
+	ids := make([]any, 0, len(people))
+	index := make(map[string]int, len(people))
+	for i, person := range people {
+		ids = append(ids, person.ID)
+		index[person.ID] = i
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	query := fmt.Sprintf(`
+		SELECT pr.person_id, pr.relation, related.id, related.name
+		FROM person_relations pr
+		INNER JOIN people related ON related.id = pr.related_person_id
+		WHERE pr.person_id IN (%s) AND COALESCE(related.name, '') <> ''
+		ORDER BY pr.relation ASC, related.name ASC`, placeholders)
+
+	rows, err := db.Query(query, ids...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var personID string
+		var relation PersonRelation
+		if err := rows.Scan(&personID, &relation.Relation, &relation.ID, &relation.Name); err != nil {
+			return err
+		}
+		if i, ok := index[personID]; ok {
+			people[i].Relations = append(people[i].Relations, relation)
+		}
+	}
+	return rows.Err()
 }
 
 func GetPersonByID(db *sql.DB, personID string) (*Person, error) {
 	person := &Person{}
 	err := db.QueryRow(`
-		SELECT id, name, lookup_name, gender, birth_year, death_year, dictionary_text, slug
-		FROM people WHERE id = ?`, personID).Scan(
-		&person.ID, &person.Name, &person.LookupName, &person.Gender, &person.BirthYear, &person.DeathYear, &person.DictionaryText, &person.Slug)
+		SELECT p.id, p.name, p.lookup_name, p.gender, p.birth_year, p.death_year, p.dictionary_text, p.slug,
+		       COALESCE(p.also_called, ''), COALESCE(bp.name, ''), COALESCE(dp.name, '')
+		FROM people p
+		LEFT JOIN locations bp ON bp.id = p.birth_place_id
+		LEFT JOIN locations dp ON dp.id = p.death_place_id
+		WHERE p.id = ?`, personID).Scan(
+		&person.ID, &person.Name, &person.LookupName, &person.Gender, &person.BirthYear, &person.DeathYear, &person.DictionaryText, &person.Slug,
+		&person.AlsoCalled, &person.BirthPlace, &person.DeathPlace)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return person, nil
+
+	single := []Person{*person}
+	if err := attachPersonRelations(db, single); err != nil {
+		return nil, err
+	}
+	return &single[0], nil
 }
 
 func GetGroupByID(db *sql.DB, groupID string) (*Group, error) {
@@ -676,9 +854,13 @@ func GetEventsByVerseID(db *sql.DB, verseID string) ([]Event, error) {
 
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
 	query := fmt.Sprintf(`
-		SELECT e.id, e.title, e.start_date, e.duration, e.sort_key
+		SELECT e.id, e.title, e.start_date, e.duration, e.sort_key, COALESCE(e.notes, ''),
+		       COALESCE(parent.id, ''), COALESCE(parent.title, ''),
+		       COALESCE(prev.id, ''), COALESCE(prev.title, '')
 		FROM events e
 		INNER JOIN event_verses ev ON ev.event_id = e.id
+		LEFT JOIN events parent ON parent.id = e.parent_event_id
+		LEFT JOIN events prev ON prev.id = e.predecessor_event_id
 		WHERE ev.verse_id IN (%s)
 		ORDER BY e.sort_key ASC, e.title ASC`, placeholders)
 
@@ -696,15 +878,481 @@ func GetEventsByVerseID(db *sql.DB, verseID string) ([]Event, error) {
 	events := make([]Event, 0)
 	for rows.Next() {
 		var event Event
-		if err := rows.Scan(&event.ID, &event.Title, &event.StartDate, &event.Duration, &event.SortKey); err != nil {
+		var parentID, parentTitle, prevID, prevTitle string
+		if err := rows.Scan(&event.ID, &event.Title, &event.StartDate, &event.Duration, &event.SortKey, &event.Notes,
+			&parentID, &parentTitle, &prevID, &prevTitle); err != nil {
 			return nil, err
 		}
+
+		if parentTitle != "" {
+			event.PartOf = &EventRef{ID: parentID, Title: parentTitle}
+		}
+		if prevTitle != "" {
+			event.Follows = &EventRef{ID: prevID, Title: prevTitle}
+		}
+
 		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+
+	if err := attachEventLocations(db, events); err != nil {
+		return nil, err
+	}
 	return events, nil
+}
+
+// attachEventLocations fills in where each event happened, in one query for the
+// whole set.
+func attachEventLocations(db *sql.DB, events []Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	ids := make([]any, 0, len(events))
+	index := make(map[string]int, len(events))
+	for i, event := range events {
+		ids = append(ids, event.ID)
+		index[event.ID] = i
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	query := fmt.Sprintf(`
+		SELECT el.event_id, l.id, l.name
+		FROM event_locations el
+		INNER JOIN locations l ON l.id = el.location_id
+		WHERE el.event_id IN (%s) AND COALESCE(l.name, '') <> ''
+		ORDER BY l.name ASC`, placeholders)
+
+	rows, err := db.Query(query, ids...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var eventID string
+		var place EventPlace
+		if err := rows.Scan(&eventID, &place.ID, &place.Name); err != nil {
+			return err
+		}
+		if i, ok := index[eventID]; ok {
+			events[i].Locations = append(events[i].Locations, place)
+		}
+	}
+	return rows.Err()
+}
+
+// GetVerseSetting returns the chronological and authorial framing of a verse:
+// the year the dataset assigns it, the era that year falls in, and the book's
+// own writing details.
+func GetVerseSetting(db *sql.DB, verseID string) (*VerseSetting, error) {
+	keys, err := getVerseLookupKeys(db, verseID)
+	if err != nil {
+		return nil, err
+	}
+
+	setting := &VerseSetting{}
+
+	if len(keys) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
+		args := make([]any, 0, len(keys))
+		for _, key := range keys {
+			args = append(args, key)
+		}
+
+		var year sql.NullInt64
+		err := db.QueryRow(fmt.Sprintf(
+			"SELECT year_num FROM verse_years WHERE osis_ref IN (%s) LIMIT 1", placeholders), args...).Scan(&year)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
+
+		if year.Valid {
+			value := int(year.Int64)
+			setting.YearNum = &value
+
+			era := &Era{}
+			err := db.QueryRow(`
+				SELECT id, name, start_year, end_year, COALESCE(summary, '')
+				FROM eras
+				WHERE ? >= start_year AND ? < end_year
+				ORDER BY sort_order ASC LIMIT 1`, value, value).Scan(
+				&era.ID, &era.Name, &era.StartYear, &era.EndYear, &era.Summary)
+			if err == nil {
+				setting.Era = era
+				setting.EraSource = "verse"
+			} else if err != sql.ErrNoRows {
+				return nil, err
+			}
+		}
+	}
+
+	book, err := getBookSettingForVerse(db, verseID)
+	if err != nil {
+		return nil, err
+	}
+	setting.Book = book
+
+	// 3,078 verses carry no year of their own — Daniel 1:1 among them. Rather
+	// than leave those with no setting at all, the era is taken from the rest of
+	// the book, and labelled as such so the UI can say where it came from.
+	if setting.Era == nil {
+		era, err := inferEraFromBook(db, verseID)
+		if err != nil {
+			return nil, err
+		}
+		if era != nil {
+			setting.Era = era
+			setting.EraSource = "book"
+		}
+	}
+
+	if setting.YearNum == nil && setting.Era == nil && setting.Book == nil {
+		return nil, nil
+	}
+	return setting, nil
+}
+
+// inferEraFromBook picks the era most of a book's dated verses fall into. Used
+// only for verses the dataset never dated.
+func inferEraFromBook(db *sql.DB, verseID string) (*Era, error) {
+	verse, err := GetVerseByID(db, verseID)
+	if err != nil || verse == nil {
+		return nil, err
+	}
+
+	var osisName string
+	err = db.QueryRow(
+		"SELECT osis_name FROM books WHERE lower(book_name) = lower(?) LIMIT 1", verse.Book).Scan(&osisName)
+	if err == sql.ErrNoRows || osisName == "" {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	era := &Era{}
+	err = db.QueryRow(`
+		SELECT e.id, e.name, e.start_year, e.end_year, COALESCE(e.summary, '')
+		FROM verse_years vy
+		INNER JOIN eras e ON vy.year_num >= e.start_year AND vy.year_num < e.end_year
+		WHERE vy.osis_ref LIKE ? || '.%'
+		GROUP BY e.id
+		ORDER BY COUNT(*) DESC LIMIT 1`, osisName).Scan(
+		&era.ID, &era.Name, &era.StartYear, &era.EndYear, &era.Summary)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return era, nil
+}
+
+func getBookSettingForVerse(db *sql.DB, verseID string) (*BookSetting, error) {
+	verse, err := GetVerseByID(db, verseID)
+	if err != nil || verse == nil {
+		return nil, err
+	}
+
+	var bookID string
+	book := &BookSetting{}
+	err = db.QueryRow(`
+		SELECT b.id, b.book_name, COALESCE(b.division, ''), COALESCE(b.testament, ''),
+		       COALESCE(b.year_written, ''), COALESCE(l.name, '')
+		FROM books b
+		LEFT JOIN locations l ON l.id = b.place_written_id
+		WHERE lower(b.book_name) = lower(?) LIMIT 1`, verse.Book).Scan(
+		&bookID, &book.Name, &book.Division, &book.Testament, &book.YearWritten, &book.PlaceWritten)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.Query(`
+		SELECT p.name FROM book_writers bw
+		INNER JOIN people p ON p.id = bw.person_id
+		WHERE bw.book_id = ? AND COALESCE(p.name, '') <> ''
+		ORDER BY p.name ASC`, bookID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		book.Writers = append(book.Writers, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return book, nil
+}
+
+// chronologyAlignedEras are the eras where the corpus's traditional dates and
+// the conventional dates on the world data agree closely enough to compare a
+// single year against a reign. Both rest on the same Roman records; everything
+// earlier does not, and can differ by decades.
+var chronologyAlignedEras = map[string]struct{}{
+	"life-of-jesus": {},
+	"early-church":  {},
+}
+
+// GetWorldContext returns the world outside the passage for the era it sits in:
+// the foreign rulers of the period, events elsewhere, and the background pieces
+// written for that era.
+//
+// The join is by era, not by year. See the schema comment on world_context for
+// why. Where the two chronologies do agree, individual rows are additionally
+// flagged as current or nearby so the UI can pick out the exact moment.
+func GetWorldContext(db *sql.DB, verseID string) (*WorldContext, error) {
+	setting, err := GetVerseSetting(db, verseID)
+	if err != nil || setting == nil || setting.Era == nil {
+		return nil, err
+	}
+
+	era := setting.Era
+	_, aligned := chronologyAlignedEras[era.ID]
+
+	world := &WorldContext{
+		EraID:       era.ID,
+		EraName:     era.Name,
+		YearAligned: aligned && setting.YearNum != nil,
+		Rulers:      []WorldRuler{},
+		Events:      []WorldEvent{},
+		Backgrounds: []EraBackground{},
+	}
+
+	rows, err := db.Query(`
+		SELECT id, kind, name, COALESCE(title, ''), COALESCE(region, ''),
+		       start_year, end_year, COALESCE(note, '')
+		FROM world_context
+		WHERE era_id = ?
+		ORDER BY COALESCE(start_year, 0) ASC, name ASC`, era.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id, kind, name, title, region, note string
+		var startYear, endYear sql.NullInt64
+
+		if err := rows.Scan(&id, &kind, &name, &title, &region, &startYear, &endYear, &note); err != nil {
+			return nil, err
+		}
+
+		start := nullableInt(startYear)
+		end := nullableInt(endYear)
+
+		switch kind {
+		case "event":
+			event := WorldEvent{ID: id, Title: name, Region: region, Year: start, Summary: note}
+			if world.YearAligned && start != nil {
+				event.Nearby = absInt(*start-*setting.YearNum) <= 25
+			}
+			world.Events = append(world.Events, event)
+		default:
+			ruler := WorldRuler{
+				ID: id, Name: name, Title: title, Region: region,
+				StartYear: start, EndYear: end, Note: note,
+			}
+			if world.YearAligned && start != nil && end != nil {
+				ruler.Current = *start <= *setting.YearNum && *setting.YearNum <= *end
+			}
+			world.Rulers = append(world.Rulers, ruler)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	backgroundRows, err := db.Query(`
+		SELECT id, COALESCE(region, ''), COALESCE(title, ''), COALESCE(body, '')
+		FROM era_backgrounds WHERE era_id = ? ORDER BY sort_order ASC`, era.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer backgroundRows.Close()
+
+	for backgroundRows.Next() {
+		var background EraBackground
+		if err := backgroundRows.Scan(&background.ID, &background.Region, &background.Title, &background.Body); err != nil {
+			return nil, err
+		}
+		world.Backgrounds = append(world.Backgrounds, background)
+	}
+	if err := backgroundRows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(world.Rulers) == 0 && len(world.Events) == 0 && len(world.Backgrounds) == 0 {
+		return nil, nil
+	}
+	return world, nil
+}
+
+func nullableInt(value sql.NullInt64) *int {
+	if !value.Valid {
+		return nil
+	}
+	result := int(value.Int64)
+	return &result
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+// articleStopWords are dictionary headwords common enough that matching them
+// against a verse says nothing. Everything shorter than four letters is already
+// excluded, so this only has to catch the frequent long ones.
+var articleStopWords = map[string]struct{}{
+	"they": {}, "them": {}, "their": {}, "with": {}, "from": {}, "that": {},
+	"this": {}, "then": {}, "there": {}, "these": {}, "those": {}, "when": {},
+	"unto": {}, "into": {}, "shall": {}, "said": {}, "come": {}, "went": {},
+	"have": {}, "will": {}, "were": {}, "your": {}, "which": {}, "what": {},
+}
+
+// GetDictionaryArticlesByVerseID returns public-domain dictionary articles for
+// the terms a verse actually uses — the Passover, leaven and firstborn kind of
+// article, which no other part of the corpus carries.
+//
+// Articles about the verse's own people and places are deliberately excluded:
+// those are already attached to the person and location records, and repeating
+// them here would send the same several kilobytes of Easton twice.
+func GetDictionaryArticlesByVerseID(db *sql.DB, verseID string, limit int) ([]DictionaryArticle, error) {
+	if limit <= 0 {
+		limit = 12
+	}
+
+	verse, err := GetVerseByID(db, verseID)
+	if err != nil || verse == nil {
+		return []DictionaryArticle{}, err
+	}
+
+	candidates := articleCandidateTerms(verse.Text)
+	if len(candidates) == 0 {
+		return []DictionaryArticle{}, nil
+	}
+
+	keys, err := getVerseLookupKeys(db, verseID)
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		keys = []string{verseID}
+	}
+
+	termPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(candidates)), ",")
+	keyPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
+
+	// Longer headwords first: "unleavened bread" is a better hit than "bread",
+	// and the limit should spend itself on the specific ones.
+	query := fmt.Sprintf(`
+		SELECT de.id, de.term, de.body, COALESCE(de.source, ''), COALESCE(de.match_type, '')
+		FROM dictionary_entries de
+		WHERE de.term_key IN (%s)
+		  AND NOT EXISTS (
+			SELECT 1 FROM dictionary_links dl
+			WHERE dl.entry_id = de.id
+			  AND ((dl.target_kind = 'person' AND dl.target_id IN (
+					SELECT person_id FROM person_verses WHERE verse_id IN (%s)))
+			    OR (dl.target_kind = 'place' AND dl.target_id IN (
+					SELECT location_id FROM verse_locations WHERE verse_id IN (%s))))
+		  )
+		GROUP BY de.term_key
+		ORDER BY length(de.term) DESC, de.term ASC
+		LIMIT ?`, termPlaceholders, keyPlaceholders, keyPlaceholders)
+
+	args := make([]any, 0, len(candidates)+len(keys)*2+1)
+	for _, term := range candidates {
+		args = append(args, term)
+	}
+	for range 2 {
+		for _, key := range keys {
+			args = append(args, key)
+		}
+	}
+	args = append(args, limit)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	articles := make([]DictionaryArticle, 0)
+	for rows.Next() {
+		var article DictionaryArticle
+		if err := rows.Scan(&article.ID, &article.Term, &article.Body, &article.Source, &article.Kind); err != nil {
+			return nil, err
+		}
+		articles = append(articles, article)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return articles, nil
+}
+
+// articleCandidateTerms reduces a verse to the lowercased one-, two- and
+// three-word phrases worth looking up as dictionary headwords.
+func articleCandidateTerms(text string) []string {
+	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !unicode.IsLetter(r) && r != '\''
+	})
+
+	seen := map[string]struct{}{}
+	candidates := make([]string, 0, len(words)*2)
+
+	add := func(phrase string) {
+		if len(phrase) < 4 {
+			return
+		}
+		if _, stop := articleStopWords[phrase]; stop {
+			return
+		}
+		if _, dup := seen[phrase]; dup {
+			return
+		}
+		seen[phrase] = struct{}{}
+		candidates = append(candidates, phrase)
+	}
+
+	for i, word := range words {
+		add(word)
+
+		// Easton lists most plurals under the singular headword, so a naive
+		// de-pluralisation catches "priests" -> "priest" without a stemmer.
+		if strings.HasSuffix(word, "es") {
+			add(strings.TrimSuffix(word, "es"))
+		}
+		if strings.HasSuffix(word, "s") {
+			add(strings.TrimSuffix(word, "s"))
+		}
+
+		if i+1 < len(words) {
+			add(word + " " + words[i+1])
+		}
+		if i+2 < len(words) {
+			add(word + " " + words[i+1] + " " + words[i+2])
+		}
+	}
+
+	return candidates
 }
 
 func GetCrossReferencesByVerseID(db *sql.DB, verseID string, limit, offset int) ([]string, error) {

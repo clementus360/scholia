@@ -313,7 +313,10 @@ CREATE TABLE IF NOT EXISTS books (
     book_name TEXT,
     testament TEXT,
     book_order INTEGER,
-    slug TEXT
+    slug TEXT,
+    division TEXT,        -- 'Pentateuch', 'Gospels', ... (Theographic bookDiv)
+    year_written TEXT,    -- free text: the dataset carries ranges like '-1451'
+    place_written_id TEXT -- locations.id, when the dataset names one
 );
 
 CREATE TABLE IF NOT EXISTS chapters (
@@ -321,7 +324,17 @@ CREATE TABLE IF NOT EXISTS chapters (
     book_id TEXT,
     osis_ref TEXT, -- e.g., 'Gen.1'
     chapter_num INTEGER,
+    writer_id TEXT, -- people.id credited with this chapter (Psalms especially)
     FOREIGN KEY(book_id) REFERENCES books(id)
+);
+
+-- 10b. Bridge: books to their traditional writers.
+-- Theographic stores writers as lookup slugs ("moses_2108"), not record ids,
+-- so the seeder resolves them through people.lookup_name.
+CREATE TABLE IF NOT EXISTS book_writers (
+    book_id TEXT,
+    person_id TEXT,
+    PRIMARY KEY (book_id, person_id)
 );
 
 -- 11. Historical People
@@ -333,8 +346,24 @@ CREATE TABLE IF NOT EXISTS people (
     birth_year INTEGER,
     death_year INTEGER,
     dictionary_text TEXT,
-    slug TEXT
+    slug TEXT,
+    also_called TEXT,     -- comma-separated alternate names, as the source stores them
+    birth_place_id TEXT,  -- locations.id
+    death_place_id TEXT   -- locations.id
 );
+
+CREATE INDEX IF NOT EXISTS idx_people_lookup_name ON people(lookup_name);
+
+-- 11b. Family graph. One row per direction per relation, so a lookup from
+-- either person finds the tie without a UNION.
+CREATE TABLE IF NOT EXISTS person_relations (
+    person_id TEXT,
+    related_person_id TEXT,
+    relation TEXT, -- father | mother | child | sibling | partner
+    PRIMARY KEY (person_id, related_person_id, relation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_person_relations_person ON person_relations(person_id);
 
 -- 12. People Groups (Tribes/Nations)
 CREATE TABLE IF NOT EXISTS groups (
@@ -348,7 +377,17 @@ CREATE TABLE IF NOT EXISTS events (
     title TEXT,
     start_date TEXT,
     duration TEXT,
-    sort_key REAL
+    sort_key REAL,
+    parent_event_id TEXT,      -- events.id: the larger episode this belongs to
+    predecessor_event_id TEXT, -- events.id: the event immediately before it
+    notes TEXT
+);
+
+-- 13b. Bridge: events to where they happened.
+CREATE TABLE IF NOT EXISTS event_locations (
+    event_id TEXT,
+    location_id TEXT,
+    PRIMARY KEY (event_id, location_id)
 );
 
 -- 14. The "Relational" Verse Table
@@ -406,6 +445,96 @@ CREATE INDEX IF NOT EXISTS idx_event_verses_verse    ON event_verses(verse_id);
 -- is rec_id, but the people/groups/events lookups all start from an OSIS ref.
 CREATE INDEX IF NOT EXISTS idx_verse_id_map_osis     ON verse_id_map(osis_ref);
 
+-- 18b. Per-verse chronology.
+--
+-- Theographic assigns a year to 28,024 of its 31,102 verses. It is the only
+-- direct dating signal in the corpus: people's birth years are populated for
+-- fewer than 3% of people, so anything derived from those covers almost
+-- nothing. Keyed by OSIS ref because that is what callers already hold.
+CREATE TABLE IF NOT EXISTS verse_years (
+    osis_ref TEXT PRIMARY KEY,
+    year_num INTEGER
+);
+
+-- 18c. Historical eras, joined to a verse through verse_years.
+--
+-- Hand-authored rather than sourced: no open dataset carries era boundaries,
+-- and the ranges below follow the same traditional chronology the Theographic
+-- year numbers use (its creation date is -4004, i.e. Ussher). The UI labels
+-- them as traditional for that reason. Ranges are [start_year, end_year).
+CREATE TABLE IF NOT EXISTS eras (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    start_year INTEGER,
+    end_year INTEGER,
+    summary TEXT,
+    sort_order INTEGER
+);
+
+-- 18c-2. The world outside the text: foreign rulers and world events, plus a
+-- background piece per era and region.
+--
+-- Joined to a verse by ERA rather than by year, and deliberately so. The verse
+-- years come from Theographic's traditional chronology while these dates follow
+-- the conventional scholarly one, and the two disagree by up to fifty years in
+-- the Old Testament — enough for a year-join to seat the wrong king beside the
+-- wrong verse. Era bands are coarse enough to absorb that disagreement.
+CREATE TABLE IF NOT EXISTS world_context (
+    id TEXT PRIMARY KEY,
+    kind TEXT, -- ruler | event
+    name TEXT,
+    title TEXT,
+    region TEXT,
+    start_year INTEGER,
+    end_year INTEGER,
+    era_id TEXT,
+    note TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_context_era ON world_context(era_id);
+
+CREATE TABLE IF NOT EXISTS era_backgrounds (
+    id TEXT PRIMARY KEY,
+    era_id TEXT,
+    region TEXT,
+    title TEXT,
+    body TEXT,
+    sort_order INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_era_backgrounds_era ON era_backgrounds(era_id);
+
+-- 18d. Dictionary articles (Easton's Bible Dictionary, 1897, public domain).
+--
+-- 6,519 articles shipped inside the Theographic export and were previously
+-- never loaded. Only the fragments already copied onto people and places
+-- reached the corpus, which left every article about a *thing* — Passover,
+-- centurion, denarius, threshing floor — unreachable.
+CREATE TABLE IF NOT EXISTS dictionary_entries (
+    id TEXT PRIMARY KEY,
+    term TEXT,
+    term_key TEXT, -- lowercased term, so a verse's words can be matched against it
+    term_id TEXT,
+    body TEXT,
+    match_type TEXT, -- person | place | multi | unmatched
+    item_num INTEGER,
+    source TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_dictionary_entries_term ON dictionary_entries(term);
+CREATE INDEX IF NOT EXISTS idx_dictionary_entries_term_key ON dictionary_entries(term_key);
+
+-- Bridge from an article to the person or place it describes, so a verse's
+-- people and places can pull their articles without matching on names.
+CREATE TABLE IF NOT EXISTS dictionary_links (
+    entry_id TEXT,
+    target_kind TEXT, -- person | place
+    target_id TEXT,
+    PRIMARY KEY (entry_id, target_kind, target_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dictionary_links_target ON dictionary_links(target_kind, target_id);
+
 -- 19. Build metadata, so a corpus produced by an older schema can be detected
 -- rather than silently served with missing indexes.
 CREATE TABLE IF NOT EXISTS corpus_meta (
@@ -435,7 +564,7 @@ CREATE TABLE IF NOT EXISTS corpus_meta (
 // its own. The API compares this against the value recorded in the file and
 // refuses to serve, or rebuilds, on a mismatch. Without that check a deploy
 // that failed to reseed would come up looking healthy and just be slow.
-const CorpusSchemaVersion = 2
+const CorpusSchemaVersion = 4
 
 // ErrCorpusOutdated reports a corpus built by an older schema version.
 var ErrCorpusOutdated = errors.New("corpus was built by an older schema version")

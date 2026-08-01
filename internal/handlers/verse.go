@@ -65,6 +65,9 @@ type VerseContextResponse struct {
 	People          []storage.Person             `json:"people"`
 	Groups          []storage.Group              `json:"groups"`
 	Events          []storage.Event              `json:"events"`
+	Setting         *storage.VerseSetting        `json:"setting,omitempty"`
+	World           *storage.WorldContext        `json:"world,omitempty"`
+	Articles        []storage.DictionaryArticle  `json:"articles"`
 	CrossReferences []string                     `json:"cross_references"`
 	Notes           []storage.Note               `json:"notes"`
 }
@@ -82,6 +85,9 @@ type VerseRangeContextResponse struct {
 	People          []storage.Person                        `json:"people"`
 	Groups          []storage.Group                         `json:"groups"`
 	Events          []storage.Event                         `json:"events"`
+	Setting         *storage.VerseSetting                   `json:"setting,omitempty"`
+	World           *storage.WorldContext                   `json:"world,omitempty"`
+	Articles        []storage.DictionaryArticle             `json:"articles"`
 	CrossReferences []string                                `json:"cross_references"`
 	Notes           []storage.Note                          `json:"notes"`
 }
@@ -167,6 +173,24 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		setting, err := storage.GetVerseSetting(h.bible, osisID)
+		if err != nil {
+			httputil.Error(w, fmt.Sprintf("Database error (setting): %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		world, err := storage.GetWorldContext(h.bible, osisID)
+		if err != nil {
+			httputil.Error(w, fmt.Sprintf("Database error (world): %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		articles, err := storage.GetDictionaryArticlesByVerseID(h.bible, osisID, 12)
+		if err != nil {
+			httputil.Error(w, fmt.Sprintf("Database error (articles): %v", err), http.StatusInternalServerError)
+			return
+		}
+
 		crossReferences, err := storage.GetCrossReferencesByVerseID(h.bible, osisID, pagination.Limit, pagination.Offset)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (cross_references): %v", err), http.StatusInternalServerError)
@@ -199,6 +223,9 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			People:          people,
 			Groups:          groups,
 			Events:          events,
+			Setting:         setting,
+			World:           world,
+			Articles:        articles,
 			CrossReferences: crossReferences,
 			Notes:           notes,
 		}
@@ -331,6 +358,27 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 		events = append(events, item)
 	}
 
+	// The setting is taken from the first verse of the range: a range sits in
+	// one book, and the year of its opening verse is the one a reader is
+	// orienting by.
+	setting, err := storage.GetVerseSetting(h.bible, rangeResult.Verses[0].ID)
+	if err != nil {
+		httputil.Error(w, fmt.Sprintf("Database error (setting): %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	world, err := storage.GetWorldContext(h.bible, rangeResult.Verses[0].ID)
+	if err != nil {
+		httputil.Error(w, fmt.Sprintf("Database error (world): %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	articles, err := storage.GetDictionaryArticlesByVerseID(h.bible, rangeResult.Verses[0].ID, 12)
+	if err != nil {
+		httputil.Error(w, fmt.Sprintf("Database error (articles): %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	crossReferences = paginateStrings(crossReferences, pagination.Offset, pagination.Limit)
 	notes := paginateNotes(notesOrdered, pagination.Offset, pagination.Limit)
 
@@ -347,6 +395,9 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 		People:          people,
 		Groups:          groups,
 		Events:          events,
+		Setting:         setting,
+		World:           world,
+		Articles:        articles,
 		CrossReferences: crossReferences,
 		Notes:           notes,
 	}, http.StatusOK, map[string]any{

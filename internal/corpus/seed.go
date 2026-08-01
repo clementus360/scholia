@@ -119,6 +119,187 @@ func getYear(fields map[string]interface{}, key string) (int, bool) {
 	return 0, false
 }
 
+// getIDs reads one of Theographic's link fields, which are always arrays of
+// record ids (or, for books.writers, of lookup slugs).
+func getIDs(fields map[string]interface{}, key string) []string {
+	raw, ok := fields[key].([]interface{})
+	if !ok {
+		return nil
+	}
+
+	ids := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+			ids = append(ids, strings.TrimSpace(s))
+		}
+	}
+	return ids
+}
+
+// getFirstID returns the single link Theographic still stores as a one-element
+// array — a chapter's writer, an event's parent.
+func getFirstID(fields map[string]interface{}, key string) string {
+	ids := getIDs(fields, key)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+// eraRow is one band of the traditional chronology used to give a verse a
+// setting when nothing else about it is known.
+type eraRow struct {
+	id        string
+	name      string
+	startYear int
+	endYear   int
+	summary   string
+}
+
+// traditionalEras follows the same chronology as the Theographic year numbers
+// this is joined against (its creation date is -4004, i.e. Ussher), so the two
+// cannot disagree. Ranges are [startYear, endYear) and must stay contiguous:
+// a gap would leave verses in that span with no era at all.
+//
+// These are editorial, not sourced from any dataset — the UI says so.
+var traditionalEras = []eraRow{
+	{"primeval", "Primeval history", -4004, -2350,
+		"From creation to the flood and the scattering at Babel."},
+	{"patriarchs", "The patriarchs", -2350, -1700,
+		"Abraham, Isaac, Jacob and Joseph: a family, a promise and a migration into Egypt."},
+	{"egypt-exodus", "Egypt and the exodus", -1700, -1451,
+		"Slavery in Egypt, the exodus, the law at Sinai and the years in the wilderness."},
+	{"conquest-judges", "Conquest and judges", -1451, -1095,
+		"Settlement in Canaan and the cycle of judges, with no king in Israel."},
+	{"united-monarchy", "The united monarchy", -1095, -975,
+		"Saul, David and Solomon: one kingdom, a capital at Jerusalem and the first temple."},
+	{"divided-kingdom", "The divided kingdom", -975, -722,
+		"Israel in the north and Judah in the south, with the prophets speaking to both."},
+	{"judah-alone", "Judah alone", -722, -586,
+		"Samaria has fallen to Assyria; Judah survives another century under Babylonian pressure."},
+	{"exile", "The exile", -586, -538,
+		"Jerusalem and the temple destroyed, the people deported to Babylon."},
+	{"return-second-temple", "Return and second temple", -538, -5,
+		"Return from exile, the rebuilt temple, and the centuries between the testaments."},
+	{"life-of-jesus", "The life of Jesus", -5, 33,
+		"The birth, ministry, death and resurrection of Jesus."},
+	{"early-church", "The early church", 33, 150,
+		"The apostles, the spread of the church beyond Judea, and the letters written to it."},
+}
+
+// worldContextFile mirrors data/world/world-context.json.
+type worldContextFile struct {
+	Rulers []struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Title     string `json:"title"`
+		Region    string `json:"region"`
+		StartYear *int   `json:"start_year"`
+		EndYear   *int   `json:"end_year"`
+		EraID     string `json:"era_id"`
+		Note      string `json:"note"`
+	} `json:"rulers"`
+	Events []struct {
+		ID      string `json:"id"`
+		Title   string `json:"title"`
+		Year    *int   `json:"year"`
+		Region  string `json:"region"`
+		EraID   string `json:"era_id"`
+		Summary string `json:"summary"`
+	} `json:"events"`
+	Backgrounds []struct {
+		ID     string `json:"id"`
+		EraID  string `json:"era_id"`
+		Region string `json:"region"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+	} `json:"backgrounds"`
+}
+
+// seedWorldContext loads the curated file of foreign rulers, world events and
+// era background pieces. It is a checked-in file rather than a live harvest so
+// that a build never depends on a third-party endpoint being up — the Docker
+// image build and the deploy both run this.
+func seedWorldContext(db *sql.DB, path string) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("⚠️ Skip world context %s: %v", path, err)
+		return
+	}
+
+	var file worldContextFile
+	if err := json.Unmarshal(raw, &file); err != nil {
+		log.Printf("⚠️ Skip world context %s: %v", path, err)
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("⚠️ Could not seed world context: %v", err)
+		return
+	}
+
+	rulers, events, backgrounds := 0, 0, 0
+
+	for _, ruler := range file.Rulers {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO world_context
+			(id, kind, name, title, region, start_year, end_year, era_id, note)
+			VALUES (?, 'ruler', ?, ?, ?, ?, ?, ?, ?)`,
+			ruler.ID, ruler.Name, ruler.Title, ruler.Region,
+			ruler.StartYear, ruler.EndYear, ruler.EraID, ruler.Note); err == nil {
+			rulers++
+		}
+	}
+
+	for _, event := range file.Events {
+		// An event is a moment, so both bounds are the same year. Storing it
+		// that way lets one query span rulers and events together.
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO world_context
+			(id, kind, name, title, region, start_year, end_year, era_id, note)
+			VALUES (?, 'event', ?, '', ?, ?, ?, ?, ?)`,
+			event.ID, event.Title, event.Region,
+			event.Year, event.Year, event.EraID, event.Summary); err == nil {
+			events++
+		}
+	}
+
+	for i, background := range file.Backgrounds {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO era_backgrounds
+			(id, era_id, region, title, body, sort_order) VALUES (?, ?, ?, ?, ?, ?)`,
+			background.ID, background.EraID, background.Region,
+			background.Title, background.Body, i); err == nil {
+			backgrounds++
+		}
+	}
+
+	tx.Commit()
+	fmt.Printf("✅ World context seeded: %d rulers, %d events, %d background pieces\n",
+		rulers, events, backgrounds)
+}
+
+func seedEras(db *sql.DB) {
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("⚠️ Could not seed eras: %v", err)
+		return
+	}
+
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO eras
+		(id, name, start_year, end_year, summary, sort_order) VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		tx.Rollback()
+		log.Printf("⚠️ Could not prepare era insert: %v", err)
+		return
+	}
+
+	for i, era := range traditionalEras {
+		stmt.Exec(era.id, era.name, era.startYear, era.endYear, era.summary, i)
+	}
+
+	tx.Commit()
+	fmt.Printf("✅ Eras seeded: %d\n", len(traditionalEras))
+}
+
 // --- UTILS ---
 
 // bookTable is the single source of truth for book identity. Each row lists the
@@ -358,6 +539,10 @@ func buildInto(dbPath, dataDir string) error {
 	SeedGeographySuite(db, at("geography"))
 
 	SeedTheographicData(db, at("history"))
+
+	seedEras(db)
+
+	seedWorldContext(db, at("world", "world-context.json"))
 
 	// After all locations (ancient + theographic) exist and are merged, attach
 	// map-shape geometry from geometry.jsonl by matching on location name.
@@ -1195,10 +1380,16 @@ func SeedTheographicData(db *sql.DB, baseDir string) {
 		nameToCanonical = map[string]string{}
 	}
 
-	// 1. Map Verse IDs (THE TRANSLATOR)
+	// 1. Map Verse IDs (THE TRANSLATOR), and record the year the dataset
+	// assigns to the verse. 28,024 of 31,102 verses carry one, which makes it
+	// the only dating signal in the corpus with real coverage.
 	seedFile(baseDir+"/verses.json", func(id string, f map[string]interface{}) {
-		tx.Exec("INSERT OR REPLACE INTO verse_id_map (rec_id, osis_ref) VALUES (?, ?)",
-			id, getString(f, "osisRef"))
+		osisRef := getString(f, "osisRef")
+		tx.Exec("INSERT OR REPLACE INTO verse_id_map (rec_id, osis_ref) VALUES (?, ?)", id, osisRef)
+
+		if year, ok := getYear(f, "yearNum"); ok && osisRef != "" {
+			tx.Exec("INSERT OR REPLACE INTO verse_years (osis_ref, year_num) VALUES (?, ?)", osisRef, year)
+		}
 	})
 
 	// 2. Seed Books (Fixed: bookOrder is usually a number)
@@ -1208,10 +1399,17 @@ func SeedTheographicData(db *sql.DB, baseDir string) {
 			order = int(val)
 		}
 
-		tx.Exec(`INSERT OR REPLACE INTO books (id, osis_name, book_name, testament, book_order, slug) 
-				VALUES (?, ?, ?, ?, ?, ?)`,
+		// placeWritten points at a Theographic place record. Places are not
+		// seeded until step 4, so the id is stored raw here and rewritten to
+		// its canonical location by normalizeBookPlaces once they exist.
+		placeWritten := getFirstID(f, "placeWritten")
+
+		tx.Exec(`INSERT OR REPLACE INTO books
+				(id, osis_name, book_name, testament, book_order, slug, division, year_written, place_written_id)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, getString(f, "osisName"), getString(f, "bookName"),
-			getString(f, "testament"), order, getString(f, "slug"))
+			getString(f, "testament"), order, getString(f, "slug"),
+			getString(f, "bookDiv"), getString(f, "yearWritten"), placeWritten)
 	})
 
 	// 3. Seed Chapters (Fixed: Extracting book ID from Array)
@@ -1225,8 +1423,8 @@ func SeedTheographicData(db *sql.DB, baseDir string) {
 			chNum = int(val)
 		}
 
-		tx.Exec("INSERT OR REPLACE INTO chapters (id, book_id, osis_ref, chapter_num) VALUES (?, ?, ?, ?)",
-			id, bookID, getString(f, "osisRef"), chNum)
+		tx.Exec("INSERT OR REPLACE INTO chapters (id, book_id, osis_ref, chapter_num, writer_id) VALUES (?, ?, ?, ?, ?)",
+			id, bookID, getString(f, "osisRef"), chNum, getFirstID(f, "writer"))
 	})
 
 	// 4. Seed Places (Fixed: Using kjvName and featureType)
@@ -1302,9 +1500,10 @@ func SeedTheographicData(db *sql.DB, baseDir string) {
 		}
 
 		// EXECUTE INSERT
-		tx.Exec(`INSERT OR REPLACE INTO people 
-            (id, name, lookup_name, gender, birth_year, death_year, dictionary_text, slug) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		tx.Exec(`INSERT OR REPLACE INTO people
+            (id, name, lookup_name, gender, birth_year, death_year, dictionary_text, slug,
+             also_called, birth_place_id, death_place_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id,
 			getString(f, "name"),
 			getString(f, "personLookup"),
@@ -1313,6 +1512,9 @@ func SeedTheographicData(db *sql.DB, baseDir string) {
 			dYear,
 			dictionaryText,
 			getString(f, "slug"),
+			getString(f, "alsoCalled"),
+			canonicalLocationID(tx, getFirstID(f, "birthPlace")),
+			canonicalLocationID(tx, getFirstID(f, "deathPlace")),
 		)
 
 		// FIX 3: Link People to Verses (Crucial for lookups)
@@ -1321,12 +1523,50 @@ func SeedTheographicData(db *sql.DB, baseDir string) {
 				tx.Exec("INSERT OR IGNORE INTO person_verses (person_id, verse_id) VALUES (?, ?)", id, vID.(string))
 			}
 		}
+
+		// The family graph. Theographic records it one way per field, so the
+		// inverse is written too: a father row implies a child row, and asking
+		// "who is related to this person" then needs one indexed lookup rather
+		// than a scan of five columns.
+		relations := []struct {
+			field   string
+			forward string
+			inverse string
+		}{
+			{"father", "father", "child"},
+			{"mother", "mother", "child"},
+			{"children", "child", ""},
+			{"siblings", "sibling", "sibling"},
+			{"partners", "partner", "partner"},
+		}
+
+		for _, rel := range relations {
+			for _, otherID := range getIDs(f, rel.field) {
+				tx.Exec(`INSERT OR IGNORE INTO person_relations (person_id, related_person_id, relation)
+					VALUES (?, ?, ?)`, id, otherID, rel.forward)
+
+				if rel.inverse != "" {
+					tx.Exec(`INSERT OR IGNORE INTO person_relations (person_id, related_person_id, relation)
+						VALUES (?, ?, ?)`, otherID, id, rel.inverse)
+				}
+			}
+		}
 	})
 
 	// 6. Seed Events (event_verses + event_participants bridges)
 	seedFile(baseDir+"/events.json", func(id string, f map[string]interface{}) {
-		tx.Exec("INSERT OR REPLACE INTO events (id, title, start_date, duration, sort_key) VALUES (?, ?, ?, ?, ?)",
-			id, getString(f, "title"), getString(f, "startDate"), getString(f, "duration"), f["sortKey"])
+		// partOf and predecessor are what turn 450 loose titles into a
+		// narrative: the episode an event belongs to, and the one it follows.
+		tx.Exec(`INSERT OR REPLACE INTO events
+			(id, title, start_date, duration, sort_key, parent_event_id, predecessor_event_id, notes)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, getString(f, "title"), getString(f, "startDate"), getString(f, "duration"), f["sortKey"],
+			getFirstID(f, "partOf"), getFirstID(f, "predecessor"), getString(f, "notes"))
+
+		for _, locID := range getIDs(f, "locations") {
+			tx.Exec("INSERT OR IGNORE INTO event_locations (event_id, location_id) VALUES (?, ?)",
+				id, canonicalLocationID(tx, locID))
+		}
 
 		if verses, ok := f["verses"].([]interface{}); ok {
 			for _, vID := range verses {
@@ -1367,7 +1607,137 @@ func SeedTheographicData(db *sql.DB, baseDir string) {
 		}
 	})
 
+	// 8. Book writers. Deferred to here because books are seeded before people
+	// and the dataset links them by lookup slug ("moses_2108") rather than by
+	// record id, so the names have to exist before they can be resolved.
+	seedBookWriters(tx, baseDir+"/books.json")
+
+	// 9. Rewrite the raw place ids stored on books in step 2 to whichever
+	// location row that place was merged into in step 4.
+	tx.Exec(`UPDATE books SET place_written_id = COALESCE(
+			(SELECT canonical_location_id FROM location_aliases WHERE alias_id = books.place_written_id),
+			place_written_id)
+		WHERE COALESCE(place_written_id, '') <> ''`)
+
+	// 10. Easton's Bible Dictionary.
+	seedEastonDictionary(tx, baseDir+"/easton.json")
+
 	tx.Commit()
+}
+
+// canonicalLocationID resolves a Theographic place record id to the location it
+// was merged into, or returns it unchanged when it was not merged.
+func canonicalLocationID(tx *sql.Tx, id string) string {
+	if strings.TrimSpace(id) == "" {
+		return ""
+	}
+
+	var canonical string
+	if err := tx.QueryRow(
+		"SELECT canonical_location_id FROM location_aliases WHERE alias_id = ?", id,
+	).Scan(&canonical); err != nil {
+		return id
+	}
+
+	if strings.TrimSpace(canonical) == "" {
+		return id
+	}
+	return canonical
+}
+
+func seedBookWriters(tx *sql.Tx, path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("Skip book writers %s: %v", path, err)
+		return
+	}
+
+	var items []TheoBase
+	if err := json.Unmarshal(data, &items); err != nil {
+		log.Printf("Skip book writers %s: %v", path, err)
+		return
+	}
+
+	linked := 0
+	for _, item := range items {
+		for _, slug := range getIDs(item.Fields, "writers") {
+			var personID string
+			err := tx.QueryRow("SELECT id FROM people WHERE lookup_name = ? LIMIT 1", slug).Scan(&personID)
+			if err != nil || personID == "" {
+				continue
+			}
+
+			if _, err := tx.Exec(
+				"INSERT OR IGNORE INTO book_writers (book_id, person_id) VALUES (?, ?)",
+				item.ID, personID,
+			); err == nil {
+				linked++
+			}
+		}
+	}
+
+	fmt.Printf("✅ Book writers seeded: %d links\n", linked)
+}
+
+// seedEastonDictionary loads the 6,519 public-domain dictionary articles that
+// ship with the Theographic export and were previously never read. Articles
+// about people and places are linked to those records; the rest — the articles
+// about things, customs and terms — are kept for lookup by term.
+func seedEastonDictionary(tx *sql.Tx, path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("Skip Easton dictionary %s: %v", path, err)
+		return
+	}
+
+	var items []TheoBase
+	if err := json.Unmarshal(data, &items); err != nil {
+		log.Printf("Skip Easton dictionary %s: %v", path, err)
+		return
+	}
+
+	entries, links := 0, 0
+	for _, item := range items {
+		f := item.Fields
+
+		body := strings.TrimSpace(getString(f, "dictText"))
+		term := strings.TrimSpace(getString(f, "termLabel"))
+		if body == "" || term == "" {
+			continue
+		}
+
+		itemNum := 0
+		if val, ok := f["itemNum"].(float64); ok {
+			itemNum = int(val)
+		}
+
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO dictionary_entries
+			(id, term, term_key, term_id, body, match_type, item_num, source)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			item.ID, term, strings.ToLower(term), getString(f, "termID"), body,
+			getString(f, "matchType"), itemNum, "Easton's Bible Dictionary (1897)",
+		); err != nil {
+			continue
+		}
+		entries++
+
+		for _, personID := range getIDs(f, "personLookup") {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO dictionary_links
+				(entry_id, target_kind, target_id) VALUES (?, 'person', ?)`, item.ID, personID); err == nil {
+				links++
+			}
+		}
+
+		for _, placeID := range getIDs(f, "placeLookup") {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO dictionary_links
+				(entry_id, target_kind, target_id) VALUES (?, 'place', ?)`,
+				item.ID, canonicalLocationID(tx, placeID)); err == nil {
+				links++
+			}
+		}
+	}
+
+	fmt.Printf("✅ Dictionary seeded: %d articles, %d links\n", entries, links)
 }
 
 // Generic loader for Theo-style JSON

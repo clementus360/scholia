@@ -298,6 +298,9 @@ type VerseRangeContext = {
   people: Person[];
   groups: Group[];
   events: Event[];
+  setting?: VerseSetting;
+  world?: WorldContext;
+  articles: DictionaryArticle[];
   cross_references: string[];
   notes: Note[];
 };
@@ -321,6 +324,16 @@ type Person = {
   death_year: number;
   dictionary_text: string;
   slug: string;
+  also_called?: string;   // comma separated alternate names
+  birth_place?: string;
+  death_place?: string;
+  relations?: PersonRelation[];
+};
+
+type PersonRelation = {
+  relation: "father" | "mother" | "child" | "sibling" | "partner";
+  id: string;
+  name: string;
 };
 
 type Group = { id: string; name: string };
@@ -331,6 +344,77 @@ type Event = {
   start_date: string;
   duration: string;
   sort_key: number;
+  notes?: string;
+  part_of?: { id: string; title: string };   // the larger episode
+  follows?: { id: string; title: string };   // the event before it
+  locations?: { id: string; name: string }[];
+};
+
+// When and where the passage sits. Every field is optional: the corpus dates
+// about 90% of verses and names a writing place for only eleven books.
+type VerseSetting = {
+  year_num?: number;
+  era?: {
+    id: string;
+    name: string;
+    start_year: number;
+    end_year: number;
+    summary: string;
+  };
+  book?: {
+    name: string;
+    division?: string;
+    testament?: string;
+    year_written?: string;
+    place_written?: string;
+    writers?: string[];
+  };
+  // "verse" when the verse carries its own date, "book" when it does not and
+  // the era was inferred from the rest of its book.
+  era_source?: "verse" | "book";
+};
+
+// The world outside the passage: who ruled the surrounding powers during its
+// era, what was happening elsewhere, and background pieces on the period.
+//
+// Joined by ERA, not by year. The verse years use a traditional chronology and
+// these dates use the conventional one; they disagree by up to fifty years in
+// the Old Testament. `year_aligned` is true only where the two can be compared
+// directly (the New Testament), and only then are `current`/`nearby` set.
+type WorldContext = {
+  era_id: string;
+  era_name: string;
+  year_aligned: boolean;
+  rulers: {
+    id: string;
+    name: string;
+    title: string;
+    region: string;
+    start_year?: number;
+    end_year?: number;
+    note?: string;
+    current: boolean;
+  }[];
+  events: {
+    id: string;
+    title: string;
+    region: string;
+    year?: number;
+    summary?: string;
+    nearby: boolean;
+  }[];
+  backgrounds: { id: string; region: string; title: string; body: string }[];
+};
+
+// Public-domain reference articles for terms the passage uses (Easton's, 1897).
+// Articles about the verse's own people and places are excluded: those already
+// travel on the person and location records.
+type DictionaryArticle = {
+  id: string;
+  term: string;
+  body: string;
+  source: string;
+  kind: string;
 };
 
 type Location = {
@@ -472,6 +556,9 @@ type VerseContextData = {
   people: Person[];
   groups: Group[];
   events: Event[];
+  setting?: VerseSetting;
+  world?: WorldContext;
+  articles: DictionaryArticle[];
   cross_references: string[];
   notes: Note[];
 };
