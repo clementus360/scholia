@@ -338,3 +338,21 @@ func withinEdits(a, b string, budget int) bool {
 
 	return previous[len(b)] <= budget
 }
+
+// exactNameMatch is the strict test used to pick between sites at the same
+// coordinate, where several may carry compatible names.
+func exactNameMatch(label string, place entity) bool {
+	want := normalizeName(label)
+
+	if want == normalizeName(place.Name) {
+		return true
+	}
+
+	for _, alias := range place.AlsoCalled {
+		if want == normalizeName(alias) {
+			return true
+		}
+	}
+
+	return false
+}

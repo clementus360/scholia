@@ -78,35 +78,49 @@ func resolvePlace(wc *wiki.Client, place entity) (result, error) {
 	// the name the corpus knows — or the modern name it records — becomes the
 	// article *for* this place. Everything else is offered as what it actually
 	// is: somewhere on the same ground.
+	// Two passes, exact agreement first. Ordering by distance alone picks the
+	// nearest thing whose name is merely compatible, and around an excavated
+	// site that is often an artefact rather than the place: Lachish resolved to
+	// the Lachish letters, which were found there and are not a city.
 	var primary *wiki.Article
 
-	for _, hit := range hits {
-		if !namesMatch(hit.Label, place.Name) && !anyNameMatches(hit.Label, place.AlsoCalled) {
-			continue
+	for _, pass := range []bool{true, false} {
+		if primary != nil {
+			break
 		}
 
-		article, err := wc.ArticleFor(hit.ID)
-		if err != nil {
-			return res, fmt.Errorf("article %s: %w", hit.ID, err)
-		}
-		if article == nil {
-			continue
-		}
+		for _, hit := range hits {
+			if pass {
+				if !exactNameMatch(hit.Label, place) {
+					continue
+				}
+			} else if !namesMatch(hit.Label, place.Name) && !anyNameMatches(hit.Label, place.AlsoCalled) {
+				continue
+			}
 
-		primary = article
-		res.Articles = append(res.Articles, article)
-		res.Links = append(res.Links, entityLink{
-			Kind:       place.Kind,
-			EntityID:   place.ID,
-			ArticleID:  article.ID,
-			Relation:   "primary",
-			Confidence: 12,
-			Method:     "coordinate+name",
-			Note: fmt.Sprintf("The corpus places %s at %.4f, %.4f, where this site sits.",
-				place.Name, place.Latitude, place.Longitude),
-		})
+			article, err := wc.ArticleFor(hit.ID)
+			if err != nil {
+				return res, fmt.Errorf("article %s: %w", hit.ID, err)
+			}
+			if article == nil {
+				continue
+			}
 
-		break
+			primary = article
+			res.Articles = append(res.Articles, article)
+			res.Links = append(res.Links, entityLink{
+				Kind:       place.Kind,
+				EntityID:   place.ID,
+				ArticleID:  article.ID,
+				Relation:   "primary",
+				Confidence: 12,
+				Method:     "coordinate+name",
+				Note: fmt.Sprintf("The corpus places %s at %.4f, %.4f, where this site sits.",
+					place.Name, place.Latitude, place.Longitude),
+			})
+
+			break
+		}
 	}
 
 	// One article can be returned twice by a radius query when an entity has
@@ -251,6 +265,14 @@ func personNote(best scored) string {
 	}
 }
 
+// Markers of antiquity. Without a coordinate these are what separate the city
+// Nebuchadnezzar sacked from the village on Long Island named after it.
+var ancientWords = []string{
+	"ancient", "archaeological", "biblical", "antiquity", "mesopotamia",
+	"sumerian", "assyrian", "babylonian", "roman empire", "classical",
+	"iron age", "bronze age", "historical region", "former",
+}
+
 // Words that mark a description as a place rather than a person or a song.
 var placeWords = []string{
 	"city", "town", "village", "region", "mountain", "mount", "river", "valley",
@@ -289,7 +311,17 @@ func resolveByName(wc *wiki.Client, e entity, words []string) (result, error) {
 		}
 
 		description := strings.ToLower(candidate.Description)
-		if !containsAny(description, words) && !containsAny(description, biblicalWords) {
+
+		// Without a coordinate there is nothing but the name, and names are
+		// reused across the world: the corpus's uncoordinated "Babylon" landed
+		// on Babylon, New York, whose description says "village" and so cleared
+		// a check that accepted any word suggesting a settlement. A place
+		// reached this way has to look like it belongs to antiquity, not merely
+		// like it is a place.
+		if !containsAny(description, biblicalWords) && !containsAny(description, ancientWords) {
+			continue
+		}
+		if words != nil && !containsAny(description, words) && !containsAny(description, ancientWords) {
 			continue
 		}
 		if !namesMatch(candidate.Label, e.Name) && !anyNameMatches(candidate.Label, e.AlsoCalled) {
