@@ -504,6 +504,53 @@ CREATE TABLE IF NOT EXISTS era_backgrounds (
 
 CREATE INDEX IF NOT EXISTS idx_era_backgrounds_era ON era_backgrounds(era_id);
 
+-- 18c-3. External historical context: encyclopedia articles about the world a
+-- passage sits in, compiled by cmd/harvest and checked in as a data file.
+--
+-- Stored as articles plus links rather than one row per pairing, because the
+-- same article is background for many passages — Nebuchadnezzar II bears on
+-- most of the exile — and duplicating a lead paragraph per event would multiply
+-- the same text across hundreds of rows.
+--
+-- extract is quoted verbatim from the source and must stay that way; revision
+-- is the version it was taken from, which is what makes the quotation checkable
+-- once the live page has moved on. Nothing here is model-written: see the
+-- header comment on cmd/harvest for what the model was and was not used for.
+CREATE TABLE IF NOT EXISTS external_articles (
+    id TEXT PRIMARY KEY,
+    wikidata_id TEXT,
+    title TEXT,
+    description TEXT, -- the one-line gloss, e.g. "King of Assyria"
+    extract TEXT,     -- the article's opening, quoted
+    url TEXT,
+    revision INTEGER,
+    retrieved TEXT,   -- ISO timestamp of the revision quoted
+    license TEXT
+);
+
+-- Linked to events and books, never to a verse directly. Events already carry
+-- their own verse links, so attaching there reaches exactly the verses the
+-- episode covers without inventing a second verse mapping to keep in step.
+CREATE TABLE IF NOT EXISTS external_article_links (
+    article_id TEXT,
+    scope TEXT,     -- event | book
+    target_id TEXT, -- events.id or books.id
+    -- history | parallel. Two different claims, kept apart deliberately: that
+    -- Nebuchadnezzar II besieged Jerusalem is history of the events, while that
+    -- Enuma Elis resembles Genesis 1 is a comparison between texts, and how the
+    -- two relate is contested. The UI renders them in separate sections and
+    -- says the app takes no view on the second.
+    kind TEXT,
+    relevance TEXT, -- one clause on why it bears on this passage
+    rank INTEGER,
+    PRIMARY KEY (scope, target_id, article_id)
+);
+
+-- The lookup runs by (scope, target_id) on every verse context request, which
+-- the primary key already leads with; this index exists for the reverse case of
+-- listing every passage an article backs.
+CREATE INDEX IF NOT EXISTS idx_external_links_article ON external_article_links(article_id);
+
 -- 18d. Dictionary articles (Easton's Bible Dictionary, 1897, public domain).
 --
 -- 6,519 articles shipped inside the Theographic export and were previously

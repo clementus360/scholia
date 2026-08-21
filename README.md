@@ -301,6 +301,7 @@ type VerseRangeContext = {
   setting?: VerseSetting;
   world?: WorldContext;
   articles: DictionaryArticle[];
+  external: ExternalArticle[];
   cross_references: string[];
   notes: Note[];
 };
@@ -415,6 +416,37 @@ type DictionaryArticle = {
   body: string;
   source: string;
   kind: string;
+};
+
+// Sourced background on the world a passage sits in, compiled by `cmd/harvest`
+// into data/world/passage-context.json and quoted rather than summarised.
+//
+// `extract` is the opening of the source article, word for word; nothing in
+// Scholia rewrites it. `revision` and `retrieved` pin the quotation to the
+// version it was taken from, so a citation stays checkable after the live page
+// moves on. `relevance` is the one field that came out of the compilation step
+// rather than the source, and clients should label it as such rather than
+// presenting it as the article's own words.
+//
+// `scope` says how specific the link is: "event" ties the article to the
+// episode this verse belongs to, "book" to the book as a whole. `kind` splits
+// two different claims and clients should keep them apart — "history" is the
+// world around the passage (attested rulers, archaeology, empires), while
+// "parallel" is another ancient text that resembles it, which is a contested
+// comparison rather than a fact about the events.
+type ExternalArticle = {
+  id: string;
+  wikidata_id: string;
+  title: string;
+  description: string;
+  extract: string;
+  url: string;
+  revision: number;
+  retrieved: string;
+  license: string;
+  relevance: string;
+  scope: "event" | "book";
+  kind: "history" | "parallel";
 };
 
 type Location = {
@@ -559,6 +591,7 @@ type VerseContextData = {
   setting?: VerseSetting;
   world?: WorldContext;
   articles: DictionaryArticle[];
+  external: ExternalArticle[];
   cross_references: string[];
   notes: Note[];
 };
@@ -687,6 +720,31 @@ These previously shared one SQLite file, which was also committed to git.
 Rebuilding the corpus — or just switching branches — destroyed user accounts and
 notes. Keeping them apart is what fixes that. `data/bible.db` is now gitignored
 and generated, never committed.
+
+### Regenerating the external historical context
+
+`data/world/passage-context.json` holds the encyclopedia articles quoted in the
+History tab. Unlike the rest of `data/`, it is not a third-party download: it is
+compiled by `cmd/harvest` and committed, so `cmd/seed` never reaches the network
+and a build cannot break because Wikipedia or a model API is down.
+
+```bash
+go run ./cmd/harvest -env ~/.config/scholia/.env -scope all \
+  -out data/world/passage-context.json -progress /tmp/harvest.jsonl
+```
+
+It needs `OPENAI_API_KEY` or `GEMINI_API_KEY` (`-provider gemini`). A full run is
+around 516 passages and takes a couple of hours; `-progress` checkpoints each one
+so an interrupted run resumes where it stopped rather than starting over. Use
+`-limit` and `-offset` to sample before committing to the whole thing.
+
+The model's role is narrow by design, and worth preserving if this is ever
+changed: it proposes candidate article titles and filters the results, and it
+writes nothing a reader sees. Every proposed title must resolve to a real
+Wikidata entity with an English Wikipedia article or it is dropped, and what gets
+stored is that article's own opening text with the revision id it came from. A
+hallucinated title therefore costs a wasted lookup rather than a false statement
+in the app. See the header comment on `cmd/harvest/main.go`.
 
 Required environment (see `.env.example` for the annotated version):
 

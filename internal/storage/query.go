@@ -220,6 +220,115 @@ type WorldContext struct {
 	Backgrounds []EraBackground `json:"backgrounds"`
 }
 
+// ExternalArticle is one encyclopedia article on the world around a passage,
+// quoted from its source rather than summarised.
+//
+// Extract is the article's own opening text. Revision and Retrieved pin it to
+// the version quoted, so the citation stays checkable after the live page moves
+// on. Relevance is the one clause saying why it was attached to this passage —
+// the only field here that came out of the harvest rather than the source, and
+// the UI labels it as such.
+type ExternalArticle struct {
+	ID          string `json:"id"`
+	WikidataID  string `json:"wikidata_id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Extract     string `json:"extract"`
+	URL         string `json:"url"`
+	Revision    int64  `json:"revision"`
+	Retrieved   string `json:"retrieved"`
+	License     string `json:"license"`
+	Relevance   string `json:"relevance"`
+	// "event" when the article is tied to the episode this verse belongs to,
+	// "book" when it is background for the book as a whole. The UI leans on
+	// this to say how specific the connection is.
+	Scope string `json:"scope"`
+	// "history" for the world the passage sits in, "parallel" for another
+	// ancient text that resembles it. The UI keeps the two apart and disclaims
+	// the second; see the schema comment on external_article_links.
+	Kind string `json:"kind"`
+}
+
+// GetExternalContext returns the sourced background for a verse: articles
+// attached to the events this verse belongs to, then articles attached to its
+// book.
+//
+// Event articles come first and are the point of the feature — they are as
+// specific as the corpus can get, because an event already knows its own
+// verses. Book articles are the fallback for the poetry, proverbs and letters
+// that no dated event covers.
+//
+// A verse in two overlapping events can reach the same article twice, so the
+// scan keeps the first occurrence and drops the rest; ordering by scope first
+// means the copy that survives is the more specific one.
+func GetExternalContext(db *sql.DB, verseID string) ([]ExternalArticle, error) {
+	// The corpus reaches a verse under several ids — the BSB code, the
+	// Theographic OSIS ref and the record id — and event_verses is keyed by
+	// the last of those. getVerseLookupKeys is what every other verse-joined
+	// query here uses to bridge them.
+	keys, err := getVerseLookupKeys(db, verseID)
+	if err != nil {
+		return nil, err
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
+	query := fmt.Sprintf(`
+		SELECT a.id, a.wikidata_id, a.title, COALESCE(a.description, ''),
+		       COALESCE(a.extract, ''), COALESCE(a.url, ''), COALESCE(a.revision, 0),
+		       COALESCE(a.retrieved, ''), COALESCE(a.license, ''),
+		       COALESCE(l.relevance, ''), l.scope, COALESCE(l.kind, 'parallel'), l.rank
+		FROM external_article_links l
+		JOIN external_articles a ON a.id = l.article_id
+		WHERE (l.scope = 'event' AND l.target_id IN (
+		          SELECT ev.event_id FROM event_verses ev WHERE ev.verse_id IN (%[1]s)))
+		   OR (l.scope = 'book' AND l.target_id IN (
+		          SELECT b.id FROM books b
+		          JOIN verses v ON lower(v.book) = lower(b.book_name)
+		          WHERE v.id IN (%[1]s)))
+		ORDER BY CASE l.kind WHEN 'history' THEN 0 ELSE 1 END,
+		         CASE l.scope WHEN 'event' THEN 0 ELSE 1 END,
+		         l.rank ASC, a.title ASC`,
+		placeholders)
+
+	// The key list is interpolated twice, so every argument is passed twice.
+	args := make([]any, 0, len(keys)*2)
+	for range 2 {
+		for _, key := range keys {
+			args = append(args, key)
+		}
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var (
+		articles []ExternalArticle
+		seen     = map[string]bool{}
+	)
+
+	for rows.Next() {
+		var a ExternalArticle
+		var rank int
+
+		if err := rows.Scan(&a.ID, &a.WikidataID, &a.Title, &a.Description, &a.Extract,
+			&a.URL, &a.Revision, &a.Retrieved, &a.License, &a.Relevance, &a.Scope, &a.Kind, &rank); err != nil {
+			return nil, err
+		}
+
+		if seen[a.ID] {
+			continue
+		}
+
+		seen[a.ID] = true
+		articles = append(articles, a)
+	}
+
+	return articles, rows.Err()
+}
+
 // DictionaryArticle is one public-domain reference article attached to a verse
 // through the people and places it mentions.
 type DictionaryArticle struct {

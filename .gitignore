@@ -38,6 +38,7 @@ dist/
 # Compiled command binaries (built from cmd/)
 /api
 /seed
+/harvest
 
 # Generated Bible database. Rebuilt from data/ sources via `go run ./cmd/seed`
 # and shipped as a build artifact, never committed. The -wal/-shm sidecars are

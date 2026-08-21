@@ -277,6 +277,88 @@ func seedWorldContext(db *sql.DB, path string) {
 		rulers, events, backgrounds)
 }
 
+// passageContextFile mirrors data/world/passage-context.json, the output of
+// cmd/harvest.
+type passageContextFile struct {
+	Articles []struct {
+		ID          string `json:"id"`
+		WikidataID  string `json:"wikidata_id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Extract     string `json:"extract"`
+		URL         string `json:"url"`
+		Revision    int64  `json:"revision"`
+		Retrieved   string `json:"retrieved"`
+		License     string `json:"license"`
+	} `json:"articles"`
+	Links []struct {
+		ArticleID string `json:"article_id"`
+		Scope     string `json:"scope"`
+		TargetID  string `json:"target_id"`
+		Kind      string `json:"kind"`
+		Relevance string `json:"relevance"`
+		Rank      int    `json:"rank"`
+	} `json:"links"`
+}
+
+// seedPassageContext loads the compiled external-context file: encyclopedia
+// articles about the world around a passage, linked to the events and books
+// they bear on.
+//
+// Like the world context beside it, this is a checked-in file rather than a
+// live harvest, so a build never depends on Wikipedia or a model API being up.
+// Missing is not an error: the file is regenerated deliberately by cmd/harvest,
+// and a checkout without it should still produce a working corpus.
+func seedPassageContext(db *sql.DB, path string) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("⚠️ Skip passage context %s: %v", path, err)
+		}
+		return
+	}
+
+	var file passageContextFile
+	if err := json.Unmarshal(raw, &file); err != nil {
+		log.Printf("⚠️ Skip passage context %s: %v", path, err)
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("⚠️ Could not seed passage context: %v", err)
+		return
+	}
+
+	articles, links := 0, 0
+
+	for _, a := range file.Articles {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO external_articles
+			(id, wikidata_id, title, description, extract, url, revision, retrieved, license)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			a.ID, a.WikidataID, a.Title, a.Description, a.Extract,
+			a.URL, a.Revision, a.Retrieved, a.License); err == nil {
+			articles++
+		}
+	}
+
+	for _, l := range file.Links {
+		kind := l.Kind
+		if kind == "" {
+			kind = "parallel"
+		}
+
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO external_article_links
+			(article_id, scope, target_id, kind, relevance, rank) VALUES (?, ?, ?, ?, ?, ?)`,
+			l.ArticleID, l.Scope, l.TargetID, kind, l.Relevance, l.Rank); err == nil {
+			links++
+		}
+	}
+
+	tx.Commit()
+	fmt.Printf("✅ Passage context seeded: %d articles, %d links\n", articles, links)
+}
+
 func seedEras(db *sql.DB) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -543,6 +625,8 @@ func buildInto(dbPath, dataDir string) error {
 	seedEras(db)
 
 	seedWorldContext(db, at("world", "world-context.json"))
+
+	seedPassageContext(db, at("world", "passage-context.json"))
 
 	// After all locations (ancient + theographic) exist and are merged, attach
 	// map-shape geometry from geometry.jsonl by matching on location name.
