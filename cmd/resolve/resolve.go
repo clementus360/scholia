@@ -160,7 +160,7 @@ func resolvePerson(wc *wiki.Client, person entity) (result, error) {
 
 	// One batched call covers instance-of and the family edges for every
 	// candidate, so scoring twenty of them costs a request rather than twenty.
-	claims, err := wc.ClaimsBatch(ids, "P31", "P22", "P25", "P26", "P40", "P3373")
+	claims, err := wc.ClaimsBatch(ids, "P31", "P1343", "P22", "P25", "P26", "P40", "P3373")
 	if err != nil {
 		return res, fmt.Errorf("claims: %w", err)
 	}
@@ -168,7 +168,7 @@ func resolvePerson(wc *wiki.Client, person entity) (result, error) {
 	relativeIDs := []string{}
 	for _, byProp := range claims {
 		for prop, targets := range byProp {
-			if prop != "P31" {
+			if prop != "P31" && prop != "P1343" {
 				relativeIDs = append(relativeIDs, targets...)
 			}
 		}
@@ -186,7 +186,7 @@ func resolvePerson(wc *wiki.Client, person entity) (result, error) {
 
 		related := map[string]string{}
 		for prop, targets := range byProp {
-			if prop == "P31" {
+			if prop == "P31" || prop == "P1343" {
 				continue
 			}
 			for _, target := range targets {
@@ -196,7 +196,7 @@ func resolvePerson(wc *wiki.Client, person entity) (result, error) {
 			}
 		}
 
-		got := scorePerson(person, candidate, byProp["P31"], related)
+		got := scorePerson(person, candidate, byProp["P31"], byProp["P1343"], related)
 		if got.score > best.score {
 			best = got
 		}
@@ -238,6 +238,8 @@ func personNote(best scored) string {
 		return "Matched on the family the corpus records."
 	case "class":
 		return "Matched by name; Wikidata records this entity as a biblical figure."
+	case "reference":
+		return "Matched by name; a Bible dictionary carries an entry on this subject."
 	default:
 		return "Matched by name alone."
 	}

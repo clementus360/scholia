@@ -184,6 +184,7 @@ func resolveOne(wc *wiki.Client, e entity) (result, error) {
 func writeOutput(path string, results []result) error {
 	articles := map[string]*wiki.Article{}
 	links := []entityLink{}
+	seenLinks := map[string]bool{}
 	neighbours := map[string][]neighbour{}
 
 	for _, res := range results {
@@ -192,7 +193,18 @@ func writeOutput(path string, results []result) error {
 				articles[article.ID] = article
 			}
 		}
-		links = append(links, res.Links...)
+		for _, link := range res.Links {
+			// A progress file can hold the same entity twice — an interrupted
+			// run resumed, or two processes sharing one checkpoint — and the
+			// results agree, so the second copy is simply dropped rather than
+			// emitted as a duplicate row.
+			key := link.Kind + "/" + link.EntityID + "/" + link.ArticleID
+			if seenLinks[key] {
+				continue
+			}
+			seenLinks[key] = true
+			links = append(links, link)
+		}
 		for _, n := range res.Neighbours {
 			neighbours[n.ArticleID] = append(neighbours[n.ArticleID], n)
 		}
