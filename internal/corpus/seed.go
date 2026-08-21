@@ -359,6 +359,108 @@ func seedPassageContext(db *sql.DB, path string) {
 	fmt.Printf("✅ Passage context seeded: %d articles, %d links\n", articles, links)
 }
 
+// entityLinksFile mirrors data/world/entity-links.json, the output of
+// cmd/resolve.
+type entityLinksFile struct {
+	Articles []struct {
+		ID          string `json:"id"`
+		WikidataID  string `json:"wikidata_id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Extract     string `json:"extract"`
+		URL         string `json:"url"`
+		Revision    int64  `json:"revision"`
+		Retrieved   string `json:"retrieved"`
+		License     string `json:"license"`
+	} `json:"articles"`
+	Links []struct {
+		Kind       string `json:"kind"`
+		EntityID   string `json:"entity_id"`
+		ArticleID  string `json:"article_id"`
+		Relation   string `json:"relation"`
+		Confidence int    `json:"confidence"`
+		Method     string `json:"method"`
+		Note       string `json:"note"`
+	} `json:"links"`
+	Neighbours []struct {
+		ArticleID string `json:"article_id"`
+		TargetID  string `json:"target_id"`
+		Label     string `json:"label"`
+		Relation  string `json:"relation"`
+		Rank      int    `json:"rank"`
+	} `json:"neighbours"`
+}
+
+// seedEntityLinks loads the encyclopedia articles matched to the corpus's own
+// people, places, events and groups.
+//
+// Articles go into external_articles beside the passage-scoped ones: both
+// pipelines quote the same summaries, and an article reached from both should
+// be stored once. Everything else about how the link was made lives in
+// entity_article_links.
+//
+// Missing is not an error, for the same reason as the passage context beside
+// it: the file is regenerated deliberately, and a checkout without it should
+// still produce a working corpus.
+func seedEntityLinks(db *sql.DB, path string) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("⚠️ Skip entity links %s: %v", path, err)
+		}
+		return
+	}
+
+	var file entityLinksFile
+	if err := json.Unmarshal(raw, &file); err != nil {
+		log.Printf("⚠️ Skip entity links %s: %v", path, err)
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("⚠️ Could not seed entity links: %v", err)
+		return
+	}
+
+	articles, links, neighbours := 0, 0, 0
+
+	for _, a := range file.Articles {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO external_articles
+			(id, wikidata_id, title, description, extract, url, revision, retrieved, license)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			a.ID, a.WikidataID, a.Title, a.Description, a.Extract,
+			a.URL, a.Revision, a.Retrieved, a.License); err == nil {
+			articles++
+		}
+	}
+
+	for _, l := range file.Links {
+		relation := l.Relation
+		if relation == "" {
+			relation = "nearby"
+		}
+
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO entity_article_links
+			(entity_kind, entity_id, article_id, relation, confidence, method, note)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			l.Kind, l.EntityID, l.ArticleID, relation, l.Confidence, l.Method, l.Note); err == nil {
+			links++
+		}
+	}
+
+	for _, n := range file.Neighbours {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO article_neighbours
+			(article_id, target_id, label, relation, rank) VALUES (?, ?, ?, ?, ?)`,
+			n.ArticleID, n.TargetID, n.Label, n.Relation, n.Rank); err == nil {
+			neighbours++
+		}
+	}
+
+	tx.Commit()
+	fmt.Printf("✅ Entity links seeded: %d articles, %d links, %d neighbours\n", articles, links, neighbours)
+}
+
 func seedEras(db *sql.DB) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -627,6 +729,7 @@ func buildInto(dbPath, dataDir string) error {
 	seedWorldContext(db, at("world", "world-context.json"))
 
 	seedPassageContext(db, at("world", "passage-context.json"))
+	seedEntityLinks(db, at("world", "entity-links.json"))
 
 	// After all locations (ancient + theographic) exist and are merged, attach
 	// map-shape geometry from geometry.jsonl by matching on location name.

@@ -302,6 +302,7 @@ type VerseRangeContext = {
   world?: WorldContext;
   articles: DictionaryArticle[];
   external: ExternalArticle[];
+  suggestions: EntitySuggestion[];
   cross_references: string[];
   notes: Note[];
 };
@@ -449,6 +450,46 @@ type ExternalArticle = {
   kind: "history" | "parallel";
 };
 
+// Outside reading for the things a verse actually names, compiled by
+// `cmd/resolve` into data/world/entity-links.json.
+//
+// Grouped by entity rather than flattened into a list, because the grouping is
+// the justification: these articles are here *because* the verse names
+// Melchizedek. Half of covered verses name a single entity, so for most of them
+// this is one group and reads as a single card.
+//
+// `relation` is the field clients must respect. "primary" means the article is
+// about the entity. "nearby" means only that it sits on the same ground — within
+// 2.5km of an ancient site there is usually a modern village, and calling that
+// the place would be a false claim. Quote a primary; reduce the rest to a chip.
+//
+// `neighbours` carry no extract. They are one hop out of the primary article in
+// Wikidata, offered as somewhere to go next; a client that wants the text
+// fetches it from Wikipedia's own CDN when a reader asks.
+type EntitySuggestion = {
+  kind: "person" | "place" | "event" | "group";
+  entity_id: string;
+  name: string;
+  articles: EntityArticle[];   // primary first
+  neighbours: { target_id: string; label: string; relation: string }[];
+};
+
+type EntityArticle = {
+  id: string;
+  wikidata_id: string;
+  title: string;
+  description: string;
+  extract: string;
+  url: string;
+  revision: number;
+  retrieved: string;
+  license: string;
+  relation: "primary" | "nearby";
+  confidence: number;
+  method: string;  // coordinate+name | coordinate | genealogy | class | name
+  note: string;    // reader-facing sentence on why this link exists
+};
+
 type Location = {
   id: string;
   name: string;
@@ -592,6 +633,7 @@ type VerseContextData = {
   world?: WorldContext;
   articles: DictionaryArticle[];
   external: ExternalArticle[];
+  suggestions: EntitySuggestion[];
   cross_references: string[];
   notes: Note[];
 };
@@ -803,6 +845,47 @@ curl -s -X DELETE "http://localhost:8080/api/v1/auth/api-keys/$KEY_ID" \
 
 This section summarizes all frontend-relevant changes introduced in the recent backend updates.
 
+
+### Regenerating the entity links
+
+`data/world/entity-links.json` holds the articles matched to the corpus's own
+people, places, events and groups. Unlike the passage context beside it, no
+model is involved at any stage, so this can be re-run as often as you like for
+nothing.
+
+```bash
+go run ./cmd/resolve -kind all -workers 10 \
+  -out data/world/entity-links.json -progress /tmp/resolve.jsonl
+```
+
+Around 5,100 entities at roughly 33 a minute, so about two and a half hours.
+`-progress` checkpoints each one, so an interrupted run resumes rather than
+starting over. `-kind` narrows it to `people`, `places`, `events` or `groups`,
+and `-limit`/`-offset` take a sample first.
+
+Each entity is matched on evidence the corpus already holds, never by asking
+anything to guess:
+
+  - **Places by coordinate.** A position survives every spelling the corpus and
+    Wikidata disagree about. But proximity is not identity: within 2.5km of an
+    ancient site there is usually a modern village, and an early draft duly
+    reported Ramah as the town of Moran and Allon as a Mamluk caravanserai. A
+    hit only becomes the article *for* a place when its label also matches a
+    name the corpus knows; everything else is offered as being nearby, which is
+    what it is. Roughly a fifth of locations carry the corpus's own
+    disambiguating suffix — "Ramah 3" — which is stripped for matching only.
+
+  - **People by genealogy.** Wikidata's search ranks "Saul" as a male given name
+    first, the apostle third and the king twelfth, behind a footballer. Nothing
+    in that ordering knows which Saul a verse in 1 Samuel means, but the corpus
+    does: `person_relations` records that his father was Kish and his children
+    were Jonathan and Michal, and Wikidata records the same. Candidates are
+    scored on that overlap, and when nothing overlaps the result is no link
+    rather than the apostle.
+
+An entity that cannot be matched gets nothing. That is the right outcome for the
+long tail of genealogy-only names no encyclopedia covers, and it is why the
+file's coverage is lower than the entity count and should stay that way.
 ### What changed
 
 1. Unified API envelope is now standard everywhere

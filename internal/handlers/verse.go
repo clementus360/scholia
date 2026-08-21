@@ -69,6 +69,7 @@ type VerseContextResponse struct {
 	World           *storage.WorldContext        `json:"world,omitempty"`
 	Articles        []storage.DictionaryArticle  `json:"articles"`
 	External        []storage.ExternalArticle    `json:"external"`
+	Suggestions     []storage.EntitySuggestion   `json:"suggestions"`
 	CrossReferences []string                     `json:"cross_references"`
 	Notes           []storage.Note               `json:"notes"`
 }
@@ -90,6 +91,7 @@ type VerseRangeContextResponse struct {
 	World           *storage.WorldContext                   `json:"world,omitempty"`
 	Articles        []storage.DictionaryArticle             `json:"articles"`
 	External        []storage.ExternalArticle               `json:"external"`
+	Suggestions     []storage.EntitySuggestion              `json:"suggestions"`
 	CrossReferences []string                                `json:"cross_references"`
 	Notes           []storage.Note                          `json:"notes"`
 }
@@ -199,6 +201,12 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		suggestions, err := storage.GetEntitySuggestions(h.bible, osisID)
+		if err != nil {
+			httputil.Error(w, fmt.Sprintf("Database error (suggestions): %v", err), http.StatusInternalServerError)
+			return
+		}
+
 		crossReferences, err := storage.GetCrossReferencesByVerseID(h.bible, osisID, pagination.Limit, pagination.Offset)
 		if err != nil {
 			httputil.Error(w, fmt.Sprintf("Database error (cross_references): %v", err), http.StatusInternalServerError)
@@ -235,6 +243,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			World:           world,
 			Articles:        articles,
 			External:        external,
+			Suggestions:     suggestions,
 			CrossReferences: crossReferences,
 			Notes:           notes,
 		}
@@ -276,6 +285,8 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 
 	externalByID := map[string]storage.ExternalArticle{}
 	externalOrdered := make([]storage.ExternalArticle, 0)
+	suggestionsSeen := map[string]bool{}
+	suggestionsOrdered := make([]storage.EntitySuggestion, 0)
 
 	for _, verse := range rangeResult.Verses {
 		analysis, err := storage.GetVerseAnalysisByVerseID(h.bible, verse.ID)
@@ -342,6 +353,23 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 			}
 			externalByID[item.ID] = item
 			externalOrdered = append(externalOrdered, item)
+		}
+
+		// One entity is named by many verses in a range, so the first
+		// occurrence wins and the rest are dropped: the suggestions for
+		// Jerusalem do not improve by being repeated once per verse.
+		suggestions, err := storage.GetEntitySuggestions(h.bible, verse.ID)
+		if err != nil {
+			httputil.Error(w, fmt.Sprintf("Database error (suggestions): %v", err), http.StatusInternalServerError)
+			return
+		}
+		for _, item := range suggestions {
+			key := item.Kind + "/" + item.EntityID
+			if suggestionsSeen[key] {
+				continue
+			}
+			suggestionsSeen[key] = true
+			suggestionsOrdered = append(suggestionsOrdered, item)
 		}
 
 		refs, err := storage.GetCrossReferencesByVerseID(h.bible, verse.ID, 1000, 0)
@@ -428,6 +456,7 @@ func (h *VerseHandler) GetVerseContext(w http.ResponseWriter, r *http.Request) {
 		World:           world,
 		Articles:        articles,
 		External:        externalOrdered,
+		Suggestions:     suggestionsOrdered,
 		CrossReferences: crossReferences,
 		Notes:           notes,
 	}, http.StatusOK, map[string]any{

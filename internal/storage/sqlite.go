@@ -551,6 +551,42 @@ CREATE TABLE IF NOT EXISTS external_article_links (
 -- listing every passage an article backs.
 CREATE INDEX IF NOT EXISTS idx_external_links_article ON external_article_links(article_id);
 
+-- 18c. Articles reached through the corpus's own entities (cmd/resolve).
+--
+-- These share external_articles above rather than getting a table of their own:
+-- both pipelines quote the same Wikipedia summaries, and Jerusalem's extract
+-- should be stored once however it was reached.
+--
+-- What differs is how the link was made, and that is worth keeping. A place
+-- matched on a coordinate *and* a name is the place; one matched on proximity
+-- alone is merely nearby, and within 2.5km of an ancient site that is usually a
+-- modern village. Relation carries that distinction to the UI, which quotes a
+-- primary and reduces everything else to a chip. Method and confidence exist so
+-- a bad link can be traced to the rule that made it.
+CREATE TABLE IF NOT EXISTS entity_article_links (
+    entity_kind TEXT, -- person | place | event | group
+    entity_id   TEXT, -- people.id, locations.id, events.id or groups.id
+    article_id  TEXT, -- external_articles.id
+    relation    TEXT, -- primary | nearby
+    confidence  INTEGER,
+    method      TEXT, -- coordinate+name | coordinate | genealogy | class | name
+    note        TEXT, -- reader-facing sentence on why this link exists
+    PRIMARY KEY (entity_kind, entity_id, article_id)
+);
+
+-- One hop out of a resolved article, for readers who want to keep going.
+-- Labels only: an extract for every neighbour would multiply the corpus for
+-- clicks most readers never make, and the browser can fetch one from
+-- Wikipedia's own CDN at the moment it is asked for.
+CREATE TABLE IF NOT EXISTS article_neighbours (
+    article_id TEXT, -- external_articles.id
+    target_id  TEXT, -- Wikidata id of the neighbour
+    label      TEXT,
+    relation   TEXT, -- "part of", "father", "followed by"
+    rank       INTEGER,
+    PRIMARY KEY (article_id, target_id)
+);
+
 -- 18d. Dictionary articles (Easton's Bible Dictionary, 1897, public domain).
 --
 -- 6,519 articles shipped inside the Theographic export and were previously
