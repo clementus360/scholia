@@ -13,9 +13,15 @@ import (
 // neighbour rather than a match.
 const siteRadiusKm = 2.5
 
-// Candidates pulled for an ambiguous name. King Saul ranks twelfth, so a narrow
-// window is the difference between resolving him and losing him.
-const nameCandidates = 20
+// Candidates pulled for an ambiguous name.
+//
+// Fifty, because the names that need help are exactly the ones with the most
+// homonyms: King Saul ranks twelfth, Daniel twenty-third, and Benjamin
+// twenty-sixth behind a prime minister and several physicists. It is also where
+// the cost stops rising — wbgetentities scores fifty candidates in the same
+// single batched request it takes to score twenty, so the wider net is very
+// nearly free, and fifty is the most that endpoint accepts at once.
+const nameCandidates = 50
 
 // Neighbours kept per article, and the edges worth following.
 const maxNeighbours = 8
