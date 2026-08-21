@@ -37,9 +37,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/joho/godotenv"
-
 	"github.com/clementus360/scholia/internal/storage"
+	"github.com/clementus360/scholia/internal/wiki"
+	"github.com/joho/godotenv"
 )
 
 // link joins one article to one passage, with the reason it was kept.
@@ -60,15 +60,15 @@ type link struct {
 
 // result is one passage's finished work, and the unit of resumability.
 type result struct {
-	Scope    string     `json:"scope"`
-	TargetID string     `json:"target_id"`
-	Articles []*article `json:"articles"`
-	Links    []link     `json:"links"`
+	Scope    string          `json:"scope"`
+	TargetID string          `json:"target_id"`
+	Articles []*wiki.Article `json:"articles"`
+	Links    []link          `json:"links"`
 }
 
 type output struct {
 	About    map[string]string `json:"_about"`
-	Articles []*article        `json:"articles"`
+	Articles []*wiki.Article   `json:"articles"`
 	Links    []link            `json:"links"`
 }
 
@@ -187,7 +187,7 @@ func loadBriefs(db *sql.DB, scope string) ([]brief, error) {
 // hundred to one of them would be absurd. Re-running against the same progress
 // file picks up only what is missing.
 func run(client llm, db *sql.DB, briefs []brief, done map[string]bool, maxTerms, workers int, progPath string) []result {
-	wiki := newWikiClient("Scholia/1.0 (https://github.com/clementus360/scholia; historical context harvester)", 4)
+	wc := wiki.New("Scholia/1.0 (https://github.com/clementus360/scholia; historical context harvester)", 4)
 
 	var (
 		mu        sync.Mutex
@@ -215,7 +215,7 @@ func run(client llm, db *sql.DB, briefs []brief, done map[string]bool, maxTerms,
 			defer wg.Done()
 
 			for b := range queue {
-				res, err := harvestOne(client, wiki, b, maxTerms)
+				res, err := harvestOne(client, wc, b, maxTerms)
 
 				mu.Lock()
 				completed++
@@ -281,7 +281,7 @@ func run(client llm, db *sql.DB, briefs []brief, done map[string]bool, maxTerms,
 
 // harvestOne runs the four steps for a single passage: propose, resolve, quote,
 // judge.
-func harvestOne(client llm, wiki *wikiClient, b brief, maxTerms int) (result, error) {
+func harvestOne(client llm, wc *wiki.Client, b brief, maxTerms int) (result, error) {
 	res := result{Scope: b.Scope, TargetID: b.TargetID}
 
 	proposals, err := propose(client, b, maxTerms)
@@ -290,12 +290,12 @@ func harvestOne(client llm, wiki *wikiClient, b brief, maxTerms int) (result, er
 	}
 
 	var (
-		candidates []*article
+		candidates []*wiki.Article
 		reasons    []string
 	)
 
 	for _, p := range proposals {
-		found, err := wiki.resolve(p.Query)
+		found, err := wc.Resolve(p.Query)
 		if err != nil {
 			log.Printf("  resolve %q: %v", p.Query, err)
 			continue
@@ -356,7 +356,7 @@ func harvestOne(client llm, wiki *wikiClient, b brief, maxTerms int) (result, er
 	return res, nil
 }
 
-func slicesContains(articles []*article, want *article) bool {
+func slicesContains(articles []*wiki.Article, want *wiki.Article) bool {
 	for _, a := range articles {
 		if a.WikidataID == want.WikidataID {
 			return true
@@ -370,7 +370,7 @@ func slicesContains(articles []*article, want *article) bool {
 // Wikidata id, links sorted so the output is stable across runs and a diff
 // shows real changes rather than map ordering.
 func write(path string, results []result) error {
-	articles := map[string]*article{}
+	articles := map[string]*wiki.Article{}
 	var links []link
 
 	for _, res := range results {
@@ -380,7 +380,7 @@ func write(path string, results []result) error {
 		links = append(links, res.Links...)
 	}
 
-	flat := make([]*article, 0, len(articles))
+	flat := make([]*wiki.Article, 0, len(articles))
 	for _, a := range articles {
 		flat = append(flat, a)
 	}

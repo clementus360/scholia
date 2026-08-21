@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/clementus360/scholia/internal/wiki"
 )
 
 // The model is used for exactly two jobs, and neither of them writes anything a
@@ -111,7 +113,7 @@ func proposePrompt(b brief, max int) string {
 	return sb.String()
 }
 
-func judgePrompt(b brief, articles []*article) string {
+func judgePrompt(b brief, articles []*wiki.Article) string {
 	var sb strings.Builder
 
 	sb.WriteString(judgeInstruction)
@@ -208,7 +210,7 @@ func propose(client llm, b brief, max int) ([]proposal, error) {
 //
 // The returned map is keyed by candidate index. An article the model says
 // nothing about is absent, and callers treat absence as a rejection.
-func judge(client llm, b brief, articles []*article) (map[int]verdict, error) {
+func judge(client llm, b brief, articles []*wiki.Article) (map[int]verdict, error) {
 	if len(articles) == 0 {
 		return map[int]verdict{}, nil
 	}
